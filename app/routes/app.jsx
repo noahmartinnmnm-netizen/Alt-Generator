@@ -1,4 +1,3 @@
-import React from "react";
 import { Link, Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
@@ -24,6 +23,7 @@ export default function App() {
             Home
           </Link>
           <Link to="/app/image-alt-text">Image Alt text</Link>
+          <Link to="/app/history">History</Link>
           <Link to="/app/settings">Settings</Link>
         </ui-nav-menu>
         <Outlet />

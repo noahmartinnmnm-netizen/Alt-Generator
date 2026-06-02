@@ -41,6 +41,77 @@ model ImageCache {
   updatedAt DateTime @updatedAt
 }
 
+model ShopCredits {
+  shop         String   @id
+  totalCredits Int      @default(30)
+  usedCredits  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model CreditUsage {
+  id        Int               @id @default(autoincrement())
+  shop      String
+  productId String
+  imageId   String
+  imageUrl  String
+  altText   String?
+  status    CreditUsageStatus @default(RESERVED)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([shop, createdAt])
+  @@index([shop, imageId])
+}
+
+enum CreditUsageStatus {
+  RESERVED
+  USED
+  REFUNDED
+}
+
+model SeoChangeHistory {
+  id                       Int             @id @default(autoincrement())
+  shop                     String
+  productId                String
+  imageId                  String?
+  imageUrl                 String?
+  changeType               SeoChangeType
+  previousAltText          String?
+  suggestedAltText         String?
+  appliedAltText           String?
+  previousSeoTitle         String?
+  previousSeoDescription   String?
+  suggestedSeoTitle        String?
+  suggestedSeoDescription  String?
+  appliedSeoTitle          String?
+  appliedSeoDescription    String?
+  status                   SeoChangeStatus @default(SUGGESTED)
+  errorMessage             String?
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+  appliedAt                DateTime?
+  rolledBackAt             DateTime?
+
+  @@index([shop, createdAt])
+  @@index([shop, status])
+  @@index([shop, imageId])
+  @@index([shop, productId, changeType])
+}
+
+enum SeoChangeType {
+  IMAGE_ALT_TEXT
+  PRODUCT_SEO
+}
+
+enum SeoChangeStatus {
+  SUGGESTED
+  APPLIED
+  REJECTED
+  FAILED
+  ROLLED_BACK
+}
+
 model ProductKeywords {
   productId String   @id
   keywords  String

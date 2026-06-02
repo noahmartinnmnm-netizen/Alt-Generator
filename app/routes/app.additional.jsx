@@ -5,8 +5,7 @@ import {
   Text,
   BlockStack,
   List,
-  Link,
-  Box
+  Link
 } from "@shopify/polaris";
 
 export default function AdditionalPage() {

@@ -1,6 +1,5 @@
 import { useLoaderData, useNavigate } from "react-router";
 import { authenticate } from "../shopify.server";
-import React from "react";
 import {
   Page,
   Layout,
@@ -18,7 +17,6 @@ import {
 import {
   MagicIcon,
   ImageIcon,
-  SearchIcon,
   SettingsIcon,
   CheckIcon,
   CreditCardIcon
@@ -28,13 +26,15 @@ export const loader = async ({ request }) => {
   const { 
     getAllProductImages, 
     getShopSettings,
-    getCachedImagesCount
+    getShopAltTextUsageCount,
+    getShopCreditBalance
   } = await import("../lib/seo.server");
   
   const { session, admin } = await authenticate.admin(request);
   const productImages = await getAllProductImages(admin);
-  const cachedCount = await getCachedImagesCount();
+  const usageCount = await getShopAltTextUsageCount(session.shop);
   const shopSettings = await getShopSettings(session.shop);
+  const creditBalance = await getShopCreditBalance(session.shop);
 
   const totalImages = productImages.length;
   const imagesWithoutAltCount = productImages.filter(img => !img.altText || img.altText.trim() === "").length;
@@ -46,12 +46,10 @@ export const loader = async ({ request }) => {
     totalImages,
     optimizedCount,
     imagesWithoutAltCount,
-    aiGeneratedCount: cachedCount,
-    availableCredits: 100, // Mocked for now
+    aiGeneratedCount: usageCount,
+    availableCredits: creditBalance.availableCredits,
+    totalCredits: creditBalance.totalCredits,
     progress,
-    productsWithoutSeoCount: Array.from(new Set(productImages.map(p => p.productId)))
-      .map(id => productImages.find(p => p.productId === id))
-      .filter(p => !p.productSeo?.title || !p.productSeo?.description).length,
     shopSettings
   };
 };
@@ -63,8 +61,8 @@ export default function Dashboard() {
     imagesWithoutAltCount,
     aiGeneratedCount,
     availableCredits,
-    progress,
-    productsWithoutSeoCount 
+    totalCredits,
+    progress
   } = useLoaderData();
   const navigate = useNavigate();
 
@@ -73,7 +71,7 @@ export default function Dashboard() {
       <Layout>
         <Layout.Section>
           <Banner title="Welcome to SEO Hero AI" tone="info">
-            <p>Your AI-powered assistant for Shopify SEO optimization. Monitor and improve your store's search visibility from here.</p>
+            <p>Your AI-powered assistant for Shopify SEO optimization. Monitor and improve your store&apos;s search visibility from here.</p>
           </Banner>
         </Layout.Section>
 
@@ -137,7 +135,7 @@ export default function Dashboard() {
                   <Icon source={CreditCardIcon} tone="base" />
                 </InlineStack>
                 <Text as="p" variant="headingLg">{availableCredits}</Text>
-                <Text as="p" color="subdued">Remaining AI generations</Text>
+                <Text as="p" color="subdued">Remaining AI generations out of {totalCredits}</Text>
               </BlockStack>
             </Card>
           </InlineGrid>

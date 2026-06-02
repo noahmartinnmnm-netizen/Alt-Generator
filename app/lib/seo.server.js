@@ -1,11 +1,184 @@
 import OpenAI from "openai";
 import prisma from "../db.server";
 
+const INITIAL_ALT_TEXT_CREDITS = 30;
+
+export class CreditLimitExceededError extends Error {
+  constructor(availableCredits, requestedCredits) {
+    super(`Not enough credits. ${availableCredits} available, ${requestedCredits} requested.`);
+    this.name = "CreditLimitExceededError";
+    this.availableCredits = availableCredits;
+    this.requestedCredits = requestedCredits;
+  }
+}
+
+function mapShopCredits(credits) {
+  const totalCredits = credits?.totalCredits ?? INITIAL_ALT_TEXT_CREDITS;
+  const usedCredits = credits?.usedCredits ?? 0;
+
+  return {
+    totalCredits,
+    usedCredits,
+    availableCredits: Math.max(totalCredits - usedCredits, 0),
+  };
+}
+
+/**
+ * Creates the store's credit account on first use and returns the current balance.
+ * @param {string} shop
+ */
+export async function getShopCreditBalance(shop) {
+  if (!prisma.shopCredits || !shop) {
+    return mapShopCredits(null);
+  }
+
+  const credits = await prisma.shopCredits.upsert({
+    where: { shop },
+    update: {},
+    create: {
+      shop,
+      totalCredits: INITIAL_ALT_TEXT_CREDITS,
+      usedCredits: 0,
+    },
+  });
+
+  return mapShopCredits(credits);
+}
+
+/**
+ * Atomically reserves credits before spending AI calls.
+ * @param {string} shop
+ * @param {{ productId: string, imageId: string, url: string }[]} images
+ */
+export async function reserveAltTextCredits(shop, images) {
+  const uniqueImages = Array.from(
+    new Map(images.map((image) => [image.imageId, image])).values()
+  );
+
+  if (!prisma.shopCredits || uniqueImages.length === 0) {
+    return [];
+  }
+
+  return await prisma.$transaction(async (tx) => {
+    const credits = await tx.shopCredits.upsert({
+      where: { shop },
+      update: {},
+      create: {
+        shop,
+        totalCredits: INITIAL_ALT_TEXT_CREDITS,
+        usedCredits: 0,
+      },
+    });
+
+    const availableCredits = credits.totalCredits - credits.usedCredits;
+    if (availableCredits < uniqueImages.length) {
+      throw new CreditLimitExceededError(availableCredits, uniqueImages.length);
+    }
+
+    const updateResult = await tx.shopCredits.updateMany({
+      where: {
+        shop,
+        usedCredits: {
+          lte: credits.totalCredits - uniqueImages.length,
+        },
+      },
+      data: {
+        usedCredits: {
+          increment: uniqueImages.length,
+        },
+      },
+    });
+
+    if (updateResult.count !== 1) {
+      const latestCredits = await tx.shopCredits.findUnique({ where: { shop } });
+      const latestBalance = mapShopCredits(latestCredits);
+      throw new CreditLimitExceededError(latestBalance.availableCredits, uniqueImages.length);
+    }
+
+    return await Promise.all(
+      uniqueImages.map((image) =>
+        tx.creditUsage.create({
+          data: {
+            shop,
+            productId: image.productId,
+            imageId: image.imageId,
+            imageUrl: image.url.startsWith("http") ? image.url : `https:${image.url}`,
+          },
+        })
+      )
+    );
+  });
+}
+
+/**
+ * Finalizes a reserved credit after the generated alt text is successfully applied.
+ * @param {number} usageId
+ * @param {string} altText
+ */
+export async function markAltTextCreditUsed(usageId, altText) {
+  if (!prisma.creditUsage || !usageId) {
+    return null;
+  }
+
+  return await prisma.creditUsage.update({
+    where: { id: usageId },
+    data: {
+      status: "USED",
+      altText,
+    },
+  });
+}
+
+/**
+ * Refunds a reserved credit when generation or Shopify update fails.
+ * @param {number} usageId
+ */
+export async function refundAltTextCredit(usageId) {
+  if (!prisma.creditUsage || !prisma.shopCredits || !usageId) {
+    return null;
+  }
+
+  return await prisma.$transaction(async (tx) => {
+    const usage = await tx.creditUsage.findUnique({
+      where: { id: usageId },
+    });
+
+    if (!usage || usage.status !== "RESERVED") {
+      return usage;
+    }
+
+    const refundResult = await tx.creditUsage.updateMany({
+      where: {
+        id: usageId,
+        status: "RESERVED",
+      },
+      data: {
+        status: "REFUNDED",
+      },
+    });
+
+    if (refundResult.count !== 1) {
+      return await tx.creditUsage.findUnique({ where: { id: usageId } });
+    }
+
+    await tx.shopCredits.update({
+      where: { shop: usage.shop },
+      data: {
+        usedCredits: {
+          decrement: 1,
+        },
+      },
+    });
+
+    return await tx.creditUsage.findUnique({ where: { id: usageId } });
+  });
+}
+
 /**
  * Fetches all product images from Shopify using the Media API.
  * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
  */
-export async function getAllProductImages(admin) {
+export async function getAllProductImages(admin, maxProducts = 1000) {
   const query = `
     query getProducts($cursor: String) {
       products(first: 20, after: $cursor) {
@@ -45,13 +218,16 @@ export async function getAllProductImages(admin) {
   let hasNextPage = true;
   let cursor = null;
 
-  while (hasNextPage && productImages.length < 50) {
+  let productsScanned = 0;
+
+  while (hasNextPage && productsScanned < maxProducts) {
     const response = await admin.graphql(query, {
       variables: { cursor },
     });
 
     const data = await response.json();
     const productEdges = data.data.products.edges;
+    productsScanned += productEdges.length;
 
     for (const edge of productEdges) {
       const product = edge.node;
@@ -76,7 +252,221 @@ export async function getAllProductImages(admin) {
     cursor = productEdges.length > 0 ? productEdges[productEdges.length - 1].cursor : null;
   }
 
+  try {
+    if (prisma.imageCache && productImages.length > 0) {
+      const urls = productImages.map((image) =>
+        image.url.startsWith("http") ? image.url : `https:${image.url}`
+      );
+      const cachedImages = await prisma.imageCache.findMany({
+        where: {
+          url: {
+            in: urls,
+          },
+        },
+        select: {
+          url: true,
+          updatedAt: true,
+        },
+      });
+      const generatedAtByUrl = new Map(
+        cachedImages.map((image) => [image.url, image.updatedAt.toISOString()])
+      );
+
+      productImages = productImages.map((image) => {
+        const fullUrl = image.url.startsWith("http") ? image.url : `https:${image.url}`;
+        return {
+          ...image,
+          generatedAt: generatedAtByUrl.get(fullUrl) || null,
+        };
+      });
+    }
+  } catch (error) {
+    console.error("Image cache timestamp lookup error:", error);
+  }
+
   return productImages;
+}
+
+function normalizeImageUrl(imageUrl) {
+  return imageUrl?.startsWith("http") ? imageUrl : `https:${imageUrl}`;
+}
+
+function mapProductImage(product, media) {
+  return {
+    productId: product.id,
+    productTitle: product.title,
+    productDescription: product.description,
+    productSeo: product.seo,
+    imageId: media.id,
+    url: media.image.url,
+    altText: media.alt || "",
+  };
+}
+
+async function enrichImagesWithHistory(shop, productImages) {
+  if (!prisma.seoChangeHistory || productImages.length === 0) {
+    return productImages;
+  }
+
+  const imageIds = productImages.map((image) => image.imageId);
+  const productIds = Array.from(new Set(productImages.map((image) => image.productId)));
+
+  const [imageChanges, productChanges] = await Promise.all([
+    prisma.seoChangeHistory.findMany({
+      where: {
+        shop,
+        changeType: "IMAGE_ALT_TEXT",
+        imageId: { in: imageIds },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.seoChangeHistory.findMany({
+      where: {
+        shop,
+        changeType: "PRODUCT_SEO",
+        productId: { in: productIds },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  const latestImageChangeById = new Map();
+  for (const change of imageChanges) {
+    if (!latestImageChangeById.has(change.imageId)) {
+      latestImageChangeById.set(change.imageId, change);
+    }
+  }
+
+  const latestProductChangeById = new Map();
+  for (const change of productChanges) {
+    if (!latestProductChangeById.has(change.productId)) {
+      latestProductChangeById.set(change.productId, change);
+    }
+  }
+
+  return productImages.map((image) => ({
+    ...image,
+    latestImageChange: latestImageChangeById.get(image.imageId) || null,
+    latestProductSeoChange: latestProductChangeById.get(image.productId) || null,
+    generatedAt: latestImageChangeById.get(image.imageId)?.appliedAt?.toISOString()
+      || latestImageChangeById.get(image.imageId)?.createdAt?.toISOString()
+      || image.generatedAt
+      || null,
+  }));
+}
+
+function matchesAuditFilter(image, filter) {
+  const hasAlt = Boolean(image.altText?.trim());
+  const hasSeo = Boolean(image.productSeo?.title && image.productSeo?.description);
+  const imageStatus = image.latestImageChange?.status;
+  const seoStatus = image.latestProductSeoChange?.status;
+
+  if (filter === "missing_alt") return !hasAlt;
+  if (filter === "has_alt") return hasAlt;
+  if (filter === "ai_generated") return ["SUGGESTED", "APPLIED"].includes(imageStatus);
+  if (filter === "needs_seo") return !hasSeo;
+  if (filter === "failed") return imageStatus === "FAILED" || seoStatus === "FAILED";
+  return true;
+}
+
+/**
+ * Fetches one cursor-backed page of product images and enriches it with local AI history.
+ * Filters are applied to the streamed Shopify pages because Shopify cannot query product
+ * media directly by alt-text state.
+ */
+export async function getProductImageAudit(admin, shop, options = {}) {
+  const {
+    after = null,
+    before = null,
+    query: searchQuery = "",
+    filter = "all",
+    pageSize = 25,
+  } = options;
+  const isPreviousPage = Boolean(before);
+  const productWindowSize = Math.min(Math.max(pageSize, 10), 50);
+  const paginationArgs = isPreviousPage
+    ? `last: ${productWindowSize}, before: $cursor`
+    : `first: ${productWindowSize}, after: $cursor`;
+
+  const query = `
+    query getProductImageAudit($cursor: String, $productQuery: String) {
+      products(${paginationArgs}, query: $productQuery) {
+        edges {
+          node {
+            id
+            title
+            description
+            seo {
+              title
+              description
+            }
+            media(first: 25) {
+              edges {
+                node {
+                  id
+                  alt
+                  ... on MediaImage {
+                    image {
+                      url
+                    }
+                  }
+                }
+              }
+            }
+          }
+          cursor
+        }
+        pageInfo {
+          hasNextPage
+          hasPreviousPage
+          startCursor
+          endCursor
+        }
+      }
+    }
+  `;
+
+  const productQuery = searchQuery ? `title:*${searchQuery.replace(/"/g, "")}*` : null;
+  const response = await admin.graphql(query, {
+    variables: {
+      cursor: before || after || null,
+      productQuery,
+    },
+  });
+  const data = await response.json();
+  const products = data.data.products;
+  const productImages = [];
+
+  for (const edge of products.edges) {
+    for (const mediaEdge of edge.node.media.edges) {
+      const media = mediaEdge.node;
+      if (media.image) {
+        productImages.push(mapProductImage(edge.node, media));
+      }
+    }
+  }
+
+  const enrichedImages = await enrichImagesWithHistory(shop, productImages);
+  const filteredImages = enrichedImages.filter((image) => matchesAuditFilter(image, filter));
+
+  return {
+    images: filteredImages.slice(0, pageSize),
+    pageInfo: products.pageInfo,
+  };
+}
+
+export async function getImageAuditCounts(admin, shop, maxProducts = 1000) {
+  const productImages = await getAllProductImages(admin, maxProducts);
+  const enrichedImages = await enrichImagesWithHistory(shop, productImages);
+  const productById = new Map(enrichedImages.map((image) => [image.productId, image]));
+
+  return {
+    totalImages: enrichedImages.length,
+    missingAltText: enrichedImages.filter((image) => !image.altText?.trim()).length,
+    optimizedAltText: enrichedImages.filter((image) => image.altText?.trim()).length,
+    productsMissingSeo: Array.from(productById.values()).filter((image) => !image.productSeo?.title || !image.productSeo?.description).length,
+    aiGenerated: enrichedImages.filter((image) => ["SUGGESTED", "APPLIED"].includes(image.latestImageChange?.status)).length,
+  };
 }
 
 /**
@@ -123,6 +513,25 @@ export async function updateImageAltText(admin, productId, mediaId, altText) {
 }
 
 /**
+ * Saves the latest known alt text for an image in the local cache.
+ * @param {string} imageUrl
+ * @param {string} altText
+ */
+export async function saveImageAltTextCache(imageUrl, altText) {
+  if (!prisma.imageCache) {
+    return null;
+  }
+
+  const fullUrl = imageUrl.startsWith("http") ? imageUrl : `https:${imageUrl}`;
+
+  return await prisma.imageCache.upsert({
+    where: { url: fullUrl },
+    update: { altText },
+    create: { url: fullUrl, altText },
+  });
+}
+
+/**
  * Generates SEO-optimized alt text for an image using OpenAI GPT-4o-mini.
  * @param {string} imageUrl
  * @param {string} [keywords]
@@ -132,22 +541,6 @@ export async function updateImageAltText(admin, productId, mediaId, altText) {
 export async function generateAltText(imageUrl, keywords = "", shopSettings = null) {
   // Ensure URL has protocol
   const fullUrl = imageUrl.startsWith("http") ? imageUrl : `https:${imageUrl}`;
-
-  // Check cache first
-  try {
-    if (prisma.imageCache) {
-      const cached = await prisma.imageCache.findUnique({
-        where: { url: fullUrl }
-      });
-      // If keywords or shop settings are provided, we might want to regenerate even if cached
-      if (cached && !keywords && !shopSettings) {
-        console.log(`Using cached alt text for: ${fullUrl}`);
-        return cached.altText;
-      }
-    }
-  } catch (error) {
-    console.error("Cache lookup error:", error);
-  }
 
   const rawKey = process.env.OPENAI_API_KEY;
   if (!rawKey) {
@@ -373,6 +766,23 @@ export async function getCachedImagesCount() {
 }
 
 /**
+ * Fetches the number of successful AI alt text generations for one shop.
+ * @param {string} shop
+ */
+export async function getShopAltTextUsageCount(shop) {
+  if (!prisma.creditUsage || !shop) {
+    return 0;
+  }
+
+  return await prisma.creditUsage.count({
+    where: {
+      shop,
+      status: "USED",
+    },
+  });
+}
+
+/**
  * Fetches product images with empty alt text from Shopify.
  * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
  */
@@ -455,4 +865,221 @@ export async function saveShopSettings(shop, settings) {
     update: { ...settings },
     create: { shop, ...settings }
   });
+}
+
+export async function createImageAltTextSuggestion(shop, image, suggestedAltText) {
+  if (!prisma.seoChangeHistory) {
+    return null;
+  }
+
+  return await prisma.seoChangeHistory.create({
+    data: {
+      shop,
+      productId: image.productId,
+      imageId: image.imageId,
+      imageUrl: normalizeImageUrl(image.url),
+      changeType: "IMAGE_ALT_TEXT",
+      previousAltText: image.altText || "",
+      suggestedAltText,
+      status: "SUGGESTED",
+    },
+  });
+}
+
+export async function createProductSeoSuggestion(shop, product, seo) {
+  if (!prisma.seoChangeHistory) {
+    return null;
+  }
+
+  return await prisma.seoChangeHistory.create({
+    data: {
+      shop,
+      productId: product.productId,
+      changeType: "PRODUCT_SEO",
+      previousSeoTitle: product.productSeo?.title || "",
+      previousSeoDescription: product.productSeo?.description || "",
+      suggestedSeoTitle: seo.title || "",
+      suggestedSeoDescription: seo.description || "",
+      status: "SUGGESTED",
+    },
+  });
+}
+
+export async function updateSuggestion(shop, id, data) {
+  if (!prisma.seoChangeHistory) {
+    return null;
+  }
+
+  const change = await prisma.seoChangeHistory.findFirst({
+    where: {
+      id: Number(id),
+      shop,
+    },
+    select: { id: true },
+  });
+
+  if (!change) {
+    throw new Error("Suggestion was not found for this shop.");
+  }
+
+  return await prisma.seoChangeHistory.update({
+    where: { id: change.id },
+    data,
+  });
+}
+
+export async function rejectSuggestion(shop, id) {
+  return await updateSuggestion(shop, id, {
+    status: "REJECTED",
+  });
+}
+
+export async function applyImageAltTextSuggestion(admin, shop, id) {
+  const change = await prisma.seoChangeHistory.findFirst({
+    where: {
+      id: Number(id),
+      shop,
+      changeType: "IMAGE_ALT_TEXT",
+      status: "SUGGESTED",
+    },
+  });
+
+  if (!change) {
+    throw new Error("Suggestion was not found or is no longer pending.");
+  }
+
+  const altText = change.suggestedAltText || "";
+  const response = await updateImageAltText(admin, change.productId, change.imageId, altText);
+  const userError = response.data?.productUpdateMedia?.userErrors?.[0];
+
+  if (userError) {
+    await updateSuggestion(shop, change.id, {
+      status: "FAILED",
+      errorMessage: userError.message,
+    });
+    throw new Error(userError.message);
+  }
+
+  await saveImageAltTextCache(change.imageUrl, altText);
+
+  return await updateSuggestion(shop, change.id, {
+    status: "APPLIED",
+    appliedAltText: altText,
+    appliedAt: new Date(),
+    errorMessage: null,
+  });
+}
+
+export async function applyProductSeoSuggestion(admin, shop, id) {
+  const change = await prisma.seoChangeHistory.findFirst({
+    where: {
+      id: Number(id),
+      shop,
+      changeType: "PRODUCT_SEO",
+      status: "SUGGESTED",
+    },
+  });
+
+  if (!change) {
+    throw new Error("Suggestion was not found or is no longer pending.");
+  }
+
+  const title = change.suggestedSeoTitle || "";
+  const description = change.suggestedSeoDescription || "";
+  const response = await updateProductSEO(admin, change.productId, title, description);
+  const userError = response.data?.productUpdate?.userErrors?.[0];
+
+  if (userError) {
+    await updateSuggestion(shop, change.id, {
+      status: "FAILED",
+      errorMessage: userError.message,
+    });
+    throw new Error(userError.message);
+  }
+
+  return await updateSuggestion(shop, change.id, {
+    status: "APPLIED",
+    appliedSeoTitle: title,
+    appliedSeoDescription: description,
+    appliedAt: new Date(),
+    errorMessage: null,
+  });
+}
+
+export async function getSeoChangeHistory(shop, limit = 50) {
+  if (!prisma.seoChangeHistory) {
+    return [];
+  }
+
+  return await prisma.seoChangeHistory.findMany({
+    where: { shop },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+}
+
+export async function getLatestSuggestionsForShop(shop, limit = 200) {
+  if (!prisma.seoChangeHistory) {
+    return [];
+  }
+
+  return await prisma.seoChangeHistory.findMany({
+    where: {
+      shop,
+      status: "SUGGESTED",
+    },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+}
+
+export async function rollbackSeoChange(admin, shop, id) {
+  const change = await prisma.seoChangeHistory.findFirst({
+    where: {
+      id: Number(id),
+      shop,
+      status: "APPLIED",
+    },
+  });
+
+  if (!change) {
+    throw new Error("Only applied changes can be rolled back.");
+  }
+
+  try {
+    if (change.changeType === "IMAGE_ALT_TEXT") {
+      const response = await updateImageAltText(admin, change.productId, change.imageId, change.previousAltText || "");
+      const userError = response.data?.productUpdateMedia?.userErrors?.[0];
+
+      if (userError) {
+        throw new Error(userError.message);
+      }
+
+      await saveImageAltTextCache(change.imageUrl, change.previousAltText || "");
+    } else {
+      const response = await updateProductSEO(
+        admin,
+        change.productId,
+        change.previousSeoTitle || "",
+        change.previousSeoDescription || ""
+      );
+      const userError = response.data?.productUpdate?.userErrors?.[0];
+
+      if (userError) {
+        throw new Error(userError.message);
+      }
+    }
+
+    return await updateSuggestion(shop, change.id, {
+      status: "ROLLED_BACK",
+      rolledBackAt: new Date(),
+      errorMessage: null,
+    });
+  } catch (error) {
+    await updateSuggestion(shop, change.id, {
+      status: "FAILED",
+      errorMessage: error.message,
+    });
+    throw error;
+  }
 }

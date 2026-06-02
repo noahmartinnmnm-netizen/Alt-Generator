@@ -1,5 +1,4 @@
 import {
-  Box,
   Card,
   Layout,
   Page,
@@ -9,7 +8,6 @@ import {
   Select,
   Button,
   InlineStack,
-  Divider,
   Banner
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
