@@ -12,5 +12,13 @@ export const action = async ({ request }) => {
     await db.session.deleteMany({ where: { shop } });
   }
 
+  // Reset onboarding so a reinstall gets a clean first-run experience.
+  if (db.shopSettings) {
+    await db.shopSettings.updateMany({
+      where: { shop },
+      data: { onboardingCompleted: false },
+    });
+  }
+
   return new Response();
 };

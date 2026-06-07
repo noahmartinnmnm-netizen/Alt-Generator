@@ -8,16 +8,22 @@ import {
   Select,
   Button,
   InlineStack,
-  Banner
+  Banner,
+  Box,
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useLoaderData, useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 import { getShopSettings, saveShopSettings } from "../lib/seo.server";
+import { INDUSTRY_OPTIONS, TONE_OPTIONS } from "../lib/brand-profile.js";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session, redirect } = await authenticate.admin(request);
   const settings = await getShopSettings(session.shop);
+
+  if (!settings?.onboardingCompleted) {
+    throw redirect("/app/onboarding");
+  }
 
   return { settings: settings || {} };
 };
@@ -33,6 +39,7 @@ export const action = async ({ request }) => {
     brandValueProp: formData.get("brandValueProp"),
     productCategories: formData.get("productCategories"),
     searchTerms: formData.get("searchTerms"),
+    tone: formData.get("tone") || "professional",
   };
 
   await saveShopSettings(session.shop, settings);
@@ -50,14 +57,11 @@ export default function SettingsPage() {
     setFormState((prev) => ({ ...prev, [field]: value }));
   }, []);
 
-  const industryOptions = [
-    { label: "Select Industry", value: "" },
-    { label: "Fashion & Apparel", value: "fashion" },
-    { label: "Home & Garden", value: "home_garden" },
-    { label: "Electronics & Tech", value: "electronics" },
-    { label: "Health & Beauty", value: "beauty" },
-    { label: "Sports & Fitness", value: "sports" },
-    { label: "Other", value: "other" },
+  const industryOptions = INDUSTRY_OPTIONS;
+
+  const toneOptions = [
+    { label: "Select tone", value: "" },
+    ...TONE_OPTIONS.map((option) => ({ label: option.label, value: option.value })),
   ];
 
   const handleSave = () => {
@@ -66,11 +70,11 @@ export default function SettingsPage() {
 
   return (
     <Page
-      title="SEO Settings"
-      subtitle="Configure your business profile to improve AI-generated alt text and SEO."
+      title="Brand profile"
+      subtitle="Update how AI writes alt text for your products — brand voice, industry, tone, and SEO keywords."
       backAction={{ content: "Dashboard", url: "/app" }}
       primaryAction={{
-        content: "Save settings",
+        content: "Save brand profile",
         onAction: handleSave,
         loading: isSaving,
       }}
@@ -79,14 +83,14 @@ export default function SettingsPage() {
         <Layout.Section>
           <Banner tone="info">
             <p>
-              This settings page is for enhancing your experience with SEO. More information will improve the AI-generated results for your store.
+              These settings power every AI alt text generation. The more complete your brand profile, the better your results.
             </p>
           </Banner>
         </Layout.Section>
 
         {fetcher.data?.success && (
           <Layout.Section>
-            <Banner title="Settings saved" tone="success" onDismiss={() => {}} />
+            <Banner title="Brand profile saved" tone="success" onDismiss={() => {}} />
           </Layout.Section>
         )}
         
@@ -139,6 +143,20 @@ export default function SettingsPage() {
                   placeholder="e.g. EcoStyle"
                   autoComplete="off"
                 />
+                <Select
+                  label="Tone of voice"
+                  options={toneOptions}
+                  value={formState.tone || ""}
+                  onChange={handleFieldChange("tone")}
+                  helpText="Controls how AI writes alt text — professional, friendly, luxury, and more."
+                />
+                {formState.tone && (
+                  <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      {TONE_OPTIONS.find((option) => option.value === formState.tone)?.description}
+                    </Text>
+                  </Box>
+                )}
                 <TextField
                   label="Tagline"
                   value={formState.brandTagline || ""}
@@ -189,7 +207,7 @@ export default function SettingsPage() {
 
             <InlineStack align="end">
               <Button variant="primary" onClick={handleSave} loading={isSaving}>
-                Save Settings
+                Save brand profile
               </Button>
             </InlineStack>
           </BlockStack>

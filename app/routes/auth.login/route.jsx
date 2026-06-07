@@ -5,17 +5,29 @@ import { login } from "../../shopify.server";
 import { loginErrorMessage } from "./error.server";
 
 export const loader = async ({ request }) => {
-  const errors = loginErrorMessage(await login(request));
-
-  return { errors };
+  try {
+    const errors = loginErrorMessage(await login(request));
+    return { errors };
+  } catch (error) {
+    if (error instanceof Response) {
+      throw error;
+    }
+    console.error("Auth login loader error:", error);
+    return { errors: { shop: "Could not start login. Restart the dev server and try again." } };
+  }
 };
 
 export const action = async ({ request }) => {
-  const errors = loginErrorMessage(await login(request));
-
-  return {
-    errors,
-  };
+  try {
+    const errors = loginErrorMessage(await login(request));
+    return { errors };
+  } catch (error) {
+    if (error instanceof Response) {
+      throw error;
+    }
+    console.error("Auth login action error:", error);
+    return { errors: { shop: "Could not start login. Restart the dev server and try again." } };
+  }
 };
 
 export default function Auth() {
@@ -27,18 +39,24 @@ export default function Auth() {
   return (
     <AppProvider embedded={false}>
       <s-page>
+        <s-section heading="Install Ai-alt-Text">
+          <s-paragraph>
+            For local development, open the app from your terminal: run shopify app dev, press P,
+            then click Install in your dev store. Or open Shopify Admin → Apps → Ai-alt-Text.
+          </s-paragraph>
+        </s-section>
         <Form method="post">
-          <s-section heading="Log in">
+          <s-section heading="Manual login (fallback)">
             <s-text-field
               name="shop"
               label="Shop domain"
-              details="example.myshopify.com"
+              details="Use your .myshopify.com address, e.g. noah-testing-01.myshopify.com"
               value={shop}
               onChange={(e) => setShop(e.currentTarget.value)}
               autocomplete="on"
               error={errors.shop}
             ></s-text-field>
-            <s-button type="submit">Log in</s-button>
+            <s-button type="submit">Continue to Shopify install</s-button>
           </s-section>
         </Form>
       </s-page>

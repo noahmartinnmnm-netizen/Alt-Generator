@@ -119,13 +119,15 @@ model ProductKeywords {
 }
 
 model ShopSettings {
-  shop             String   @id
-  industry         String?
-  otherIndustry    String?
-  brandName        String?
-  brandTagline     String?
-  brandValueProp   String?
-  productCategories String?
-  searchTerms      String?
-  updatedAt        DateTime @updatedAt
+  shop                 String   @id
+  industry             String?
+  otherIndustry        String?
+  brandName            String?
+  brandTagline         String?
+  brandValueProp       String?
+  productCategories    String?
+  searchTerms          String?
+  tone                 String?
+  onboardingCompleted  Boolean  @default(false)
+  updatedAt            DateTime @updatedAt
 }

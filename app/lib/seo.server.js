@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import prisma from "../db.server";
+import { getToneInstructions } from "./brand-profile.js";
 
 const INITIAL_ALT_TEXT_CREDITS = 30;
 
@@ -469,6 +470,119 @@ export async function getImageAuditCounts(admin, shop, maxProducts = 1000) {
   };
 }
 
+const GENERIC_ALT_PATTERNS = [
+  /^image$/i,
+  /^photo$/i,
+  /^picture$/i,
+  /^img[\d_-]/i,
+  /^product$/i,
+  /^untitled$/i,
+  /^dsc[\d_-]/i,
+];
+
+function isQualityAltText(altText) {
+  if (!altText?.trim()) return false;
+  const trimmed = altText.trim();
+  if (trimmed.length < 20 || trimmed.length > 125) return false;
+  if (GENERIC_ALT_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
+  return true;
+}
+
+/**
+ * Computes a 0–100 SEO health score with breakdown and prioritized actions.
+ * @param {{ counts: object, shopSettings: object|null, productImages: object[] }} params
+ */
+export function computeSeoHealthScore({ counts, shopSettings, productImages }) {
+  const total = counts.totalImages || 0;
+  const missingAlt = counts.missingAltText || 0;
+  const optimizedAlt = counts.optimizedAltText || 0;
+  const productsMissingSeo = counts.productsMissingSeo || 0;
+
+  const altCoverageScore = total > 0 ? Math.round((optimizedAlt / total) * 50) : 50;
+
+  const imagesWithAlt = productImages.filter((image) => image.altText?.trim());
+  const qualityCount = imagesWithAlt.filter((image) => isQualityAltText(image.altText)).length;
+  const altQualityScore =
+    imagesWithAlt.length > 0
+      ? Math.round((qualityCount / imagesWithAlt.length) * 20)
+      : total === 0
+        ? 20
+        : 0;
+
+  const uniqueProducts = new Set(productImages.map((image) => image.productId)).size;
+  const productSeoScore =
+    uniqueProducts > 0
+      ? Math.round(((uniqueProducts - productsMissingSeo) / uniqueProducts) * 20)
+      : 20;
+
+  const profileFields = ["brandName", "industry", "tone"];
+  const filledFields = profileFields.filter((field) => shopSettings?.[field]).length;
+  const profileScore = Math.round((filledFields / profileFields.length) * 10);
+
+  const score = altCoverageScore + altQualityScore + productSeoScore + profileScore;
+
+  const actions = [];
+
+  if (!shopSettings?.onboardingCompleted) {
+    actions.push({
+      id: "onboarding",
+      priority: "high",
+      title: "Complete your brand profile",
+      description: "Set your brand, industry, and tone so AI writes alt text that matches your store.",
+      href: "/app/onboarding",
+      count: null,
+    });
+  }
+
+  if (missingAlt > 0) {
+    actions.push({
+      id: "missing_alt",
+      priority: "high",
+      title: `Generate alt text for ${missingAlt} image${missingAlt === 1 ? "" : "s"}`,
+      description: "Missing alt text hurts Google Image search rankings and accessibility scores.",
+      href: "/app/image-alt-text?filter=missing_alt",
+      count: missingAlt,
+    });
+  }
+
+  const weakAltCount = imagesWithAlt.filter((image) => !isQualityAltText(image.altText)).length;
+  if (weakAltCount > 0) {
+    actions.push({
+      id: "weak_alt",
+      priority: "medium",
+      title: `Improve ${weakAltCount} weak alt text${weakAltCount === 1 ? "" : "s"}`,
+      description: "Descriptions that are too short, too long, or generic carry less SEO weight.",
+      href: "/app/image-alt-text?filter=has_alt",
+      count: weakAltCount,
+    });
+  }
+
+  if (productsMissingSeo > 0) {
+    actions.push({
+      id: "missing_seo",
+      priority: "medium",
+      title: `Complete SEO for ${productsMissingSeo} product listing${productsMissingSeo === 1 ? "" : "s"}`,
+      description: "Products without a meta title or description rank lower in organic search.",
+      href: "/app/image-alt-text?filter=needs_seo",
+      count: productsMissingSeo,
+    });
+  }
+
+  const priorityOrder = { high: 0, medium: 1, low: 2 };
+
+  return {
+    score,
+    grade: score >= 80 ? "good" : score >= 60 ? "fair" : "poor",
+    breakdown: {
+      altCoverage: { score: altCoverageScore, max: 50, label: "Alt text coverage" },
+      altQuality: { score: altQualityScore, max: 20, label: "Alt text quality" },
+      productSeo: { score: productSeoScore, max: 20, label: "Product SEO listings" },
+      brandProfile: { score: profileScore, max: 10, label: "Brand profile" },
+    },
+    actions: actions.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]),
+  };
+}
+
 /**
  * Updates the alt text for an image in Shopify using the productUpdate mutation.
  * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
@@ -553,14 +667,18 @@ export async function generateAltText(imageUrl, keywords = "", shopSettings = nu
   const openai = new OpenAI({ apiKey });
 
   let contextPrompt = "Generate a clean, SEO-optimized alt text for this product image. Keep it under 125 characters and focus on descriptive keywords.";
-  
+
+  if (shopSettings?.tone) {
+    contextPrompt += `\n\nTone of voice: ${getToneInstructions(shopSettings.tone)}`;
+  }
+
   if (shopSettings) {
     const { industry, otherIndustry, brandName, brandTagline, brandValueProp, productCategories, searchTerms } = shopSettings;
     contextPrompt += "\n\nUse the following business context to improve the results:";
-    if (brandName) contextPrompt += `\n- Brand Name: ${brandName}`;
+    if (brandName) contextPrompt += `\n- Brand Name: ${brandName} (naturally weave the brand name in when it fits — do not force it)`;
     if (industry) {
       const industryText = industry === "other" ? otherIndustry : industry;
-      if (industryText) contextPrompt += `\n- Industry: ${industryText}`;
+      if (industryText) contextPrompt += `\n- Industry: ${industryText} (use industry-appropriate terminology)`;
     }
     if (brandTagline) contextPrompt += `\n- Brand Tagline: ${brandTagline}`;
     if (brandValueProp) contextPrompt += `\n- Brand Value Propositions: ${brandValueProp}`;
@@ -649,7 +767,8 @@ export async function generateProductSEO(productTitle, productDescription, shopS
           Description: ${productDescription}`;
 
   if (shopSettings) {
-    const { industry, otherIndustry, brandName, brandTagline, brandValueProp, productCategories, searchTerms } = shopSettings;
+    const { industry, otherIndustry, brandName, brandTagline, brandValueProp, productCategories, searchTerms, tone } = shopSettings;
+    if (tone) contextPrompt += `\n\nTone of voice: ${getToneInstructions(tone)}`;
     contextPrompt += "\n\nUse the following business context to improve the results:";
     if (brandName) contextPrompt += `\n- Brand Name: ${brandName}`;
     if (industry) {
@@ -846,9 +965,14 @@ export async function getShopSettings(shop) {
   if (!prisma.shopSettings) {
     return null;
   }
-  return await prisma.shopSettings.findUnique({
-    where: { shop }
-  });
+  try {
+    return await prisma.shopSettings.findUnique({
+      where: { shop },
+    });
+  } catch (error) {
+    console.error("getShopSettings error:", error);
+    return null;
+  }
 }
 
 /**
