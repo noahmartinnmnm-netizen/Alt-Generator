@@ -1,4 +1,4 @@
-import { useFetcher, useLoaderData } from "react-router";
+import { Form, useActionData, useLoaderData, useNavigation } from "react-router";
 import { useEffect } from "react";
 import {
   Page,
@@ -17,6 +17,7 @@ import {
   Icon,
 } from "@shopify/polaris";
 import { CheckIcon } from "@shopify/polaris-icons";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getShopCreditBalance } from "../lib/seo.server";
 import {
@@ -83,16 +84,28 @@ export const action = async ({ request }) => {
   }
 
   const appUrl = process.env.SHOPIFY_APP_URL || new URL(request.url).origin;
+  const requestUrl = new URL(request.url);
+  const returnUrl = new URL("/app/billing", appUrl);
+  returnUrl.searchParams.set("shop", session.shop);
+  const host = requestUrl.searchParams.get("host");
+  if (host) {
+    returnUrl.searchParams.set("host", host);
+  }
 
-  return billing.request({
+  await billing.request({
     plan: plan.billingKey,
     isTest: process.env.NODE_ENV !== "production",
-    returnUrl: `${appUrl}/app/billing`,
+    returnUrl: returnUrl.toString(),
   });
 };
 
-function PlanCard({ plan, isCurrent, isLoading, onSelect }) {
+export const headers = (headersArgs) => {
+  return boundary.headers(headersArgs);
+};
+
+function PlanCard({ plan, isCurrent, loadingPlanId }) {
   const isPopular = plan.id === "pro";
+  const isLoading = loadingPlanId === plan.id;
 
   return (
     <Card>
@@ -141,15 +154,18 @@ function PlanCard({ plan, isCurrent, isLoading, onSelect }) {
           ))}
         </BlockStack>
 
-        <Button
-          variant={isCurrent ? "secondary" : "primary"}
-          disabled={isCurrent || isLoading}
-          loading={isLoading}
-          onClick={() => onSelect(plan.id)}
-          fullWidth
-        >
-          {isCurrent ? "Current plan" : plan.price === 0 ? "Switch to Free" : `Upgrade to ${plan.name}`}
-        </Button>
+        <Form method="post">
+          <input type="hidden" name="planId" value={plan.id} />
+          <Button
+            variant={isCurrent ? "secondary" : "primary"}
+            disabled={isCurrent || Boolean(loadingPlanId)}
+            loading={isLoading}
+            submit
+            fullWidth
+          >
+            {isCurrent ? "Current plan" : plan.price === 0 ? "Switch to Free" : `Upgrade to ${plan.name}`}
+          </Button>
+        </Form>
       </BlockStack>
     </Card>
   );
@@ -157,21 +173,19 @@ function PlanCard({ plan, isCurrent, isLoading, onSelect }) {
 
 export default function BillingPage() {
   const { plans, currentPlanId, creditBalance } = useLoaderData();
-  const fetcher = useFetcher();
-  const isLoading = fetcher.state !== "idle";
+  const actionData = useActionData();
+  const navigation = useNavigation();
+  const loadingPlanId =
+    navigation.state !== "idle" ? navigation.formData?.get("planId") : null;
 
   useEffect(() => {
-    if (fetcher.data?.status === "success" && fetcher.data?.message) {
-      shopify.toast.show(fetcher.data.message);
+    if (actionData?.status === "success" && actionData?.message) {
+      shopify.toast.show(actionData.message);
     }
-    if (fetcher.data?.status === "error" && fetcher.data?.message) {
-      shopify.toast.show(fetcher.data.message, { isError: true });
+    if (actionData?.status === "error" && actionData?.message) {
+      shopify.toast.show(actionData.message, { isError: true });
     }
-  }, [fetcher.data]);
-
-  const handleSelectPlan = (planId) => {
-    fetcher.submit({ planId }, { method: "POST" });
-  };
+  }, [actionData]);
 
   const usagePercent =
     creditBalance.totalCredits > 0
@@ -226,8 +240,7 @@ export default function BillingPage() {
                 key={plan.id}
                 plan={plan}
                 isCurrent={plan.id === currentPlanId}
-                isLoading={isLoading}
-                onSelect={handleSelectPlan}
+                loadingPlanId={loadingPlanId}
               />
             ))}
           </InlineGrid>
