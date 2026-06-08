@@ -23,6 +23,7 @@ export default function App() {
             Home
           </Link>
           <Link to="/app/image-alt-text">Image Alt text</Link>
+          <Link to="/app/billing">Plans</Link>
           <Link to="/app/history">History</Link>
           <Link to="/app/settings">Brand profile</Link>
           <Link to="/app/faq">Help & FAQ</Link>

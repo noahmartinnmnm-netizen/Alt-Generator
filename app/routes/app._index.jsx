@@ -36,19 +36,28 @@ export const loader = async ({ request }) => {
     getImageAuditCounts,
     computeSeoHealthScore,
   } = await import("../lib/seo.server");
+  const { getShopSubscription, syncSubscriptionFromBillingCheck } = await import("../lib/billing.server");
+  const { PLAN_LIST } = await import("../lib/plans.server");
 
-  const { session, admin, redirect } = await authenticate.admin(request);
+  const { session, admin, redirect, billing } = await authenticate.admin(request);
   const shopSettings = await getShopSettings(session.shop);
 
   if (!shopSettings?.onboardingCompleted) {
     throw redirect("/app/onboarding");
   }
 
-  const [productImages, usageCount, creditBalance, counts] = await Promise.all([
+  const billingCheck = await billing.check({
+    plans: PLAN_LIST.map((plan) => plan.billingKey).filter(Boolean),
+    isTest: process.env.NODE_ENV !== "production",
+  });
+  await syncSubscriptionFromBillingCheck(session.shop, billingCheck);
+
+  const [productImages, usageCount, creditBalance, counts, subscription] = await Promise.all([
     getAllProductImages(admin),
     getShopAltTextUsageCount(session.shop),
     getShopCreditBalance(session.shop),
     getImageAuditCounts(admin, session.shop),
+    getShopSubscription(session.shop),
   ]);
 
   const totalImages = counts.totalImages;
@@ -70,6 +79,7 @@ export const loader = async ({ request }) => {
     shopSettings,
     seoHealth,
     counts,
+    currentPlan: subscription.plan,
   };
 };
 
@@ -103,6 +113,7 @@ export default function Dashboard() {
     shopSettings,
     seoHealth,
     counts,
+    currentPlan,
   } = useLoaderData();
   const navigate = useNavigate();
 
@@ -112,6 +123,42 @@ export default function Dashboard() {
   return (
     <Page title="Dashboard">
       <Layout>
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="400">
+              <InlineStack align="space-between" blockAlign="start">
+                <BlockStack gap="100">
+                  <Text as="h2" variant="headingMd">
+                    Your plan
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    You are on the <strong>{currentPlan.name}</strong> plan — {availableCredits} of{" "}
+                    {totalCredits} generation tokens remaining. One token = one alt text or one SEO
+                    meta title + description.
+                  </Text>
+                </BlockStack>
+                <Badge tone={currentPlan.id === "free" ? "info" : "success"}>
+                  {currentPlan.name}
+                  {currentPlan.price > 0 ? ` · $${currentPlan.price}/mo` : ""}
+                </Badge>
+              </InlineStack>
+              <ProgressBar
+                progress={totalCredits > 0 ? ((totalCredits - availableCredits) / totalCredits) * 100 : 0}
+                size="small"
+                tone={availableCredits === 0 ? "critical" : availableCredits <= totalCredits * 0.2 ? "highlight" : "success"}
+              />
+              <InlineStack gap="200">
+                <Button variant="primary" onClick={() => navigate("/app/billing")}>
+                  {currentPlan.id === "free" ? "View plans & upgrade" : "Manage plan"}
+                </Button>
+                {availableCredits === 0 ? (
+                  <Button onClick={() => navigate("/app/billing")}>Get more tokens</Button>
+                ) : null}
+              </InlineStack>
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+
         <Layout.Section>
           <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
             <Card>
@@ -285,7 +332,7 @@ export default function Dashboard() {
             <MetricCard
               title="AI generated"
               value={aiGeneratedCount}
-              subtitle={`${availableCredits} credits left`}
+              subtitle={`${availableCredits} tokens left`}
               icon={CreditCardIcon}
             />
           </InlineGrid>

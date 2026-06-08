@@ -11,35 +11,36 @@ automatically_update_urls_on_dev = true
 [webhooks]
 api_version = "2026-07"
 
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/app/scopes_update"
-  topics = [ "app/scopes_update" ]
+[[webhooks.subscriptions]]
+uri = "/webhooks/app/scopes_update"
+topics = ["app/scopes_update"]
 
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/app/uninstalled"
-  topics = [ "app/uninstalled" ]
+[[webhooks.subscriptions]]
+uri = "/webhooks/app/uninstalled"
+topics = ["app/uninstalled"]
 
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "write_products,read_products,write_files,read_files,write_metaobjects,write_metaobject_definitions"
 
 [auth]
-redirect_urls = [ "https://alt-generator-doiv.onrender.com/auth/callback" ]
+redirect_urls = [
+  "https://alt-generator-doiv.onrender.com/auth/callback"
+]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"
 name = "Demo Source Info"
 description = "Tracks products created by the Shopify app template for development"
 
-  [product.metafields.app.demo_info.access]
-  admin = "merchant_read_write"
+[product.metafields.app.demo_info.access]
+admin = "merchant_read_write"
 
 [metaobjects.app.example]
 name = "Example"
 description = "An example metaobject definition created by this template"
 
-  [metaobjects.app.example.access]
-  admin = "merchant_read_write"
+[metaobjects.app.example.access]
+admin = "merchant_read_write"
 
 [metaobjects.app.example.fields.title]
 name = "Title"

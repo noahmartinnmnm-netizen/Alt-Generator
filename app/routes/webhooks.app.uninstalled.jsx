@@ -20,5 +20,21 @@ export const action = async ({ request }) => {
     });
   }
 
+  if (db.shopSubscription) {
+    await db.shopSubscription.deleteMany({ where: { shop } });
+  }
+
+  if (db.shopCredits) {
+    await db.shopCredits.deleteMany({ where: { shop } });
+  }
+
+  if (db.creditUsage) {
+    await db.creditUsage.deleteMany({ where: { shop } });
+  }
+
+  if (db.seoChangeHistory) {
+    await db.seoChangeHistory.deleteMany({ where: { shop } });
+  }
+
   return new Response();
 };

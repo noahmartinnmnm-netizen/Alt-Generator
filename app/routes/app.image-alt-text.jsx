@@ -98,7 +98,9 @@ export const action = async ({ request }) => {
     generateAltText,
     generateProductSEO,
     reserveAltTextCredits,
+    reserveProductSeoCredits,
     markAltTextCreditUsed,
+    markGenerationCreditUsed,
     refundAltTextCredit,
     getShopCreditBalance,
     getShopSettings,
@@ -132,7 +134,7 @@ export const action = async ({ request }) => {
         return {
           status: "error",
           type: "alt_suggestion",
-          message: `You have ${error.availableCredits} credits left, but this request needs ${error.requestedCredits}.`,
+          message: `You have ${error.availableCredits} tokens left, but this request needs ${error.requestedCredits}. Upgrade your plan to continue.`,
           creditBalance: await getShopCreditBalance(session.shop),
         };
       }
@@ -186,6 +188,21 @@ export const action = async ({ request }) => {
   if (intent === "generate_product_seo_suggestion") {
     const product = JSON.parse(formData.get("product") || "{}");
     const shopSettings = await getShopSettings(session.shop);
+    let reservation = null;
+
+    try {
+      [reservation] = await reserveProductSeoCredits(session.shop, [product]);
+    } catch (error) {
+      if (error instanceof CreditLimitExceededError) {
+        return {
+          status: "error",
+          type: "seo_suggestion",
+          message: `You have ${error.availableCredits} tokens left, but this request needs ${error.requestedCredits}. Upgrade your plan to continue.`,
+          creditBalance: await getShopCreditBalance(session.shop),
+        };
+      }
+      throw error;
+    }
 
     try {
       const seo = await generateProductSEO(product.productTitle, product.productDescription, shopSettings);
@@ -197,6 +214,8 @@ export const action = async ({ request }) => {
         ? null
         : await applyProductSeoSuggestion(admin, session.shop, change.id);
 
+      await markGenerationCreditUsed(reservation?.id);
+
       return {
         status: "success",
         type: "seo_suggestion",
@@ -204,12 +223,19 @@ export const action = async ({ request }) => {
         changeId: appliedChange?.id || change.id,
         seo,
         applied: !reviewBeforeSave,
+        creditBalance: await getShopCreditBalance(session.shop),
         message: reviewBeforeSave
           ? "Search engine listing suggestion created. Review and apply to publish in Shopify."
           : "Search engine listing published to Shopify",
       };
     } catch (error) {
-      return { status: "error", type: "seo_suggestion", message: error.message };
+      await refundAltTextCredit(reservation?.id);
+      return {
+        status: "error",
+        type: "seo_suggestion",
+        message: error.message,
+        creditBalance: await getShopCreditBalance(session.shop),
+      };
     }
   }
 
@@ -229,7 +255,26 @@ export const action = async ({ request }) => {
         return {
           status: "error",
           type: "selected_suggestions",
-          message: `You have ${error.availableCredits} credits left, but this request needs ${error.requestedCredits}.`,
+          message: `You have ${error.availableCredits} tokens left, but this request needs ${error.requestedCredits}. Upgrade your plan to continue.`,
+          creditBalance: await getShopCreditBalance(session.shop),
+        };
+      }
+      throw error;
+    }
+
+    let seoReservations = [];
+
+    try {
+      seoReservations = await reserveProductSeoCredits(session.shop, uniqueProducts);
+    } catch (error) {
+      for (const reservation of reservations) {
+        await refundAltTextCredit(reservation.id);
+      }
+      if (error instanceof CreditLimitExceededError) {
+        return {
+          status: "error",
+          type: "selected_suggestions",
+          message: `You have ${error.availableCredits} tokens left, but SEO generation needs ${error.requestedCredits} more. Upgrade your plan to continue.`,
           creditBalance: await getShopCreditBalance(session.shop),
         };
       }
@@ -237,6 +282,9 @@ export const action = async ({ request }) => {
     }
 
     const reservationByImageId = new Map(reservations.map((reservation) => [reservation.imageId, reservation]));
+    const seoReservationByProductId = new Map(
+      seoReservations.map((reservation) => [reservation.productId, reservation])
+    );
     const altResults = [];
     const seoResults = [];
 
@@ -267,6 +315,7 @@ export const action = async ({ request }) => {
     }
 
     for (const product of uniqueProducts) {
+      const seoReservation = seoReservationByProductId.get(product.productId);
       try {
         const seo = await generateProductSEO(product.productTitle, product.productDescription, shopSettings);
         const change = await createProductSeoSuggestion(session.shop, product, seo);
@@ -276,6 +325,7 @@ export const action = async ({ request }) => {
         const appliedChange = reviewBeforeSave
           ? null
           : await applyProductSeoSuggestion(admin, session.shop, change.id);
+        await markGenerationCreditUsed(seoReservation?.id);
         seoResults.push({
           id: product.productId,
           changeId: appliedChange?.id || change.id,
@@ -284,6 +334,7 @@ export const action = async ({ request }) => {
           applied: !reviewBeforeSave,
         });
       } catch (error) {
+        await refundAltTextCredit(seoReservation?.id);
         seoResults.push({ id: product.productId, status: "error", error: error.message });
       }
     }
@@ -555,6 +606,13 @@ export default function ImageAltText() {
     () => productImages.filter((image) => selectedResources.includes(image.imageId)),
     [productImages, selectedResources]
   );
+
+  const selectedUniqueProductCount = useMemo(
+    () => new Set(selectedImages.map((image) => image.productId)).size,
+    [selectedImages]
+  );
+
+  const selectedTokenCost = selectedImages.length + selectedUniqueProductCount;
 
   const activeIntent = isLoading ? fetcher.formData?.get("intent") : null;
   const generatingAlt = activeIntent === "generate_alt_suggestions";
@@ -1000,7 +1058,7 @@ export default function ImageAltText() {
                       submitGenerateSeo(image);
                     }}
                     loading={isRowGeneratingSeo}
-                    disabled={isLoading}
+                    disabled={isLoading || availableCredits < 1}
                   >
                     {reviewBeforeSave ? "Suggest" : "Publish"}
                   </Button>
@@ -1081,8 +1139,16 @@ export default function ImageAltText() {
 
         {availableCredits === 0 ? (
           <Layout.Section>
-            <Banner title="No AI credits remaining" tone="warning">
-              <p>This store has used all {totalCredits} included generation credits. Existing applied changes can still be edited and rolled back from history.</p>
+            <Banner
+              title="No generation tokens remaining"
+              tone="warning"
+              action={{ content: "View plans", url: "/app/billing" }}
+            >
+              <p>
+                This store has used all {totalCredits} tokens on your current plan. Upgrade to
+                continue generating alt text and SEO meta tags. Existing applied changes can still
+                be edited and rolled back from history.
+              </p>
             </Banner>
           </Layout.Section>
         ) : null}
@@ -1116,8 +1182,8 @@ export default function ImageAltText() {
                 />
               </InlineGrid>
               <InlineStack align="space-between" blockAlign="center">
-                <Text as="p" tone={selectedResources.length > availableCredits ? "critical" : "subdued"}>
-                  {selectedResources.length} selected. {availableCredits}/{totalCredits} generation credits available.
+                <Text as="p" tone={selectedTokenCost > availableCredits ? "critical" : "subdued"}>
+                  {selectedResources.length} selected ({selectedTokenCost} tokens for alt + SEO). {availableCredits}/{totalCredits} tokens available.
                 </Text>
                 <InlineStack gap="200">
                   {pendingSuggestionsForSelected.length > 0 ? (
@@ -1136,7 +1202,7 @@ export default function ImageAltText() {
                     variant="primary"
                     onClick={() => submitGenerateSelected(selectedImages)}
                     loading={generatingSelected}
-                    disabled={selectedImages.length === 0 || selectedImages.length > availableCredits || isLoading}
+                    disabled={selectedImages.length === 0 || selectedTokenCost > availableCredits || isLoading}
                   >
                     {reviewBeforeSave ? "Generate suggestions" : "Generate and publish"}
                   </Button>

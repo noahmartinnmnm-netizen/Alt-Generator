@@ -7,9 +7,9 @@ export const FAQ_ITEMS = [
       `${APP_NAME} helps Shopify merchants improve product image SEO by generating descriptive, search-friendly alt text using AI. It also generates product meta titles and descriptions, tracks your SEO health, and lets you review, apply, or roll back changes from a history log.`,
   },
   {
-    question: "How do generation credits work?",
+    question: "How do generation tokens work?",
     answer:
-      "Each store receives 30 free generation credits when the app is installed. One credit is used per product image when you generate alt text. You can see your remaining credits on the Dashboard and Image Alt Text pages. If you run out of credits, you can still edit and roll back previously applied changes from History.",
+      "Each store starts on the Free plan with 30 generation tokens. One token is used when you generate image alt text or a product SEO meta title and description. Paid plans include more tokens each billing period: Starter ($5) includes 180 tokens, Pro ($8) includes 350 tokens, and Premium ($12) includes 500 tokens. View your plan and remaining tokens on the Dashboard or Plans page.",
   },
   {
     question: "What is the Brand Profile and why does it matter?",

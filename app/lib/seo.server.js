@@ -1,8 +1,10 @@
 import OpenAI from "openai";
 import prisma from "../db.server";
 import { getToneInstructions } from "./brand-profile.js";
+import { ensureShopSubscription, syncPlanCredits } from "./billing.server";
+import { getPlanById, PLANS } from "./plans.server";
 
-const INITIAL_ALT_TEXT_CREDITS = 30;
+const DEFAULT_PLAN_TOKENS = PLANS.free.tokens;
 
 export class CreditLimitExceededError extends Error {
   constructor(availableCredits, requestedCredits) {
@@ -13,15 +15,22 @@ export class CreditLimitExceededError extends Error {
   }
 }
 
-function mapShopCredits(credits) {
-  const totalCredits = credits?.totalCredits ?? INITIAL_ALT_TEXT_CREDITS;
+function mapShopCredits(credits, planId = "free") {
+  const plan = getPlanById(planId);
+  const totalCredits = credits?.totalCredits ?? plan.tokens ?? DEFAULT_PLAN_TOKENS;
   const usedCredits = credits?.usedCredits ?? 0;
 
   return {
+    planId,
     totalCredits,
     usedCredits,
     availableCredits: Math.max(totalCredits - usedCredits, 0),
   };
+}
+
+async function getShopPlanTokenLimit(shop) {
+  const subscription = await ensureShopSubscription(shop);
+  return getPlanById(subscription.planId).tokens;
 }
 
 /**
@@ -33,21 +42,88 @@ export async function getShopCreditBalance(shop) {
     return mapShopCredits(null);
   }
 
+  const subscription = await ensureShopSubscription(shop);
+  const planTokens = getPlanById(subscription.planId).tokens;
+
   const credits = await prisma.shopCredits.upsert({
     where: { shop },
     update: {},
     create: {
       shop,
-      totalCredits: INITIAL_ALT_TEXT_CREDITS,
+      totalCredits: planTokens,
       usedCredits: 0,
     },
   });
 
-  return mapShopCredits(credits);
+  if (credits.totalCredits !== planTokens) {
+    const synced = await syncPlanCredits(shop, subscription.planId);
+    return mapShopCredits(synced, subscription.planId);
+  }
+
+  return mapShopCredits(credits, subscription.planId);
 }
 
 /**
  * Atomically reserves credits before spending AI calls.
+ * @param {string} shop
+ * @param {{ productId: string, imageId: string, url: string }[]} images
+ */
+async function reserveGenerationCredits(shop, reservations) {
+  if (!prisma.shopCredits || reservations.length === 0) {
+    return [];
+  }
+
+  const planTokens = await getShopPlanTokenLimit(shop);
+
+  return await prisma.$transaction(async (tx) => {
+    const credits = await tx.shopCredits.upsert({
+      where: { shop },
+      update: {},
+      create: {
+        shop,
+        totalCredits: planTokens,
+        usedCredits: 0,
+      },
+    });
+
+    const availableCredits = credits.totalCredits - credits.usedCredits;
+    if (availableCredits < reservations.length) {
+      throw new CreditLimitExceededError(availableCredits, reservations.length);
+    }
+
+    const updateResult = await tx.shopCredits.updateMany({
+      where: {
+        shop,
+        usedCredits: {
+          lte: credits.totalCredits - reservations.length,
+        },
+      },
+      data: {
+        usedCredits: {
+          increment: reservations.length,
+        },
+      },
+    });
+
+    if (updateResult.count !== 1) {
+      const latestCredits = await tx.shopCredits.findUnique({ where: { shop } });
+      const subscription = await tx.shopSubscription.findUnique({ where: { shop } });
+      const latestBalance = mapShopCredits(latestCredits, subscription?.planId);
+      throw new CreditLimitExceededError(latestBalance.availableCredits, reservations.length);
+    }
+
+    return await Promise.all(
+      reservations.map((reservation) =>
+        tx.creditUsage.create({
+          data: reservation,
+        })
+      )
+    );
+  });
+}
+
+/**
+ * Atomically reserves tokens before alt text generation.
  * @param {string} shop
  * @param {{ productId: string, imageId: string, url: string }[]} images
  */
@@ -56,59 +132,34 @@ export async function reserveAltTextCredits(shop, images) {
     new Map(images.map((image) => [image.imageId, image])).values()
   );
 
-  if (!prisma.shopCredits || uniqueImages.length === 0) {
-    return [];
-  }
+  const reservations = uniqueImages.map((image) => ({
+    shop,
+    productId: image.productId,
+    imageId: image.imageId,
+    imageUrl: image.url.startsWith("http") ? image.url : `https:${image.url}`,
+    usageType: "IMAGE_ALT_TEXT",
+  }));
 
-  return await prisma.$transaction(async (tx) => {
-    const credits = await tx.shopCredits.upsert({
-      where: { shop },
-      update: {},
-      create: {
-        shop,
-        totalCredits: INITIAL_ALT_TEXT_CREDITS,
-        usedCredits: 0,
-      },
-    });
+  return await reserveGenerationCredits(shop, reservations);
+}
 
-    const availableCredits = credits.totalCredits - credits.usedCredits;
-    if (availableCredits < uniqueImages.length) {
-      throw new CreditLimitExceededError(availableCredits, uniqueImages.length);
-    }
+/**
+ * Atomically reserves one token per product before SEO meta generation.
+ * @param {string} shop
+ * @param {{ productId: string }[]} products
+ */
+export async function reserveProductSeoCredits(shop, products) {
+  const uniqueProducts = Array.from(
+    new Map(products.map((product) => [product.productId, product])).values()
+  );
 
-    const updateResult = await tx.shopCredits.updateMany({
-      where: {
-        shop,
-        usedCredits: {
-          lte: credits.totalCredits - uniqueImages.length,
-        },
-      },
-      data: {
-        usedCredits: {
-          increment: uniqueImages.length,
-        },
-      },
-    });
+  const reservations = uniqueProducts.map((product) => ({
+    shop,
+    productId: product.productId,
+    usageType: "PRODUCT_SEO",
+  }));
 
-    if (updateResult.count !== 1) {
-      const latestCredits = await tx.shopCredits.findUnique({ where: { shop } });
-      const latestBalance = mapShopCredits(latestCredits);
-      throw new CreditLimitExceededError(latestBalance.availableCredits, uniqueImages.length);
-    }
-
-    return await Promise.all(
-      uniqueImages.map((image) =>
-        tx.creditUsage.create({
-          data: {
-            shop,
-            productId: image.productId,
-            imageId: image.imageId,
-            imageUrl: image.url.startsWith("http") ? image.url : `https:${image.url}`,
-          },
-        })
-      )
-    );
-  });
+  return await reserveGenerationCredits(shop, reservations);
 }
 
 /**
@@ -128,6 +179,11 @@ export async function markAltTextCreditUsed(usageId, altText) {
       altText,
     },
   });
+}
+
+/** @param {number} usageId */
+export async function markGenerationCreditUsed(usageId, altText = null) {
+  return await markAltTextCreditUsed(usageId, altText);
 }
 
 /**

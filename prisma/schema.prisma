@@ -50,12 +50,22 @@ model ShopCredits {
   updatedAt    DateTime @updatedAt
 }
 
+model ShopSubscription {
+  shop                  String   @id
+  planId                String   @default("free")
+  shopifySubscriptionId String?
+  status                String   @default("ACTIVE")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
 model CreditUsage {
   id        Int               @id @default(autoincrement())
   shop      String
   productId String
-  imageId   String
-  imageUrl  String
+  imageId   String?
+  imageUrl  String?
+  usageType TokenUsageType    @default(IMAGE_ALT_TEXT)
   altText   String?
   status    CreditUsageStatus @default(RESERVED)
   createdAt DateTime          @default(now())
@@ -63,6 +73,12 @@ model CreditUsage {
 
   @@index([shop, createdAt])
   @@index([shop, imageId])
+  @@index([shop, productId, usageType])
+}
+
+enum TokenUsageType {
+  IMAGE_ALT_TEXT
+  PRODUCT_SEO
 }
 
 enum CreditUsageStatus {

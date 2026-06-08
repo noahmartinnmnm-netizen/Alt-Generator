@@ -66,7 +66,10 @@ export const action = async ({ request }) => {
 
   await saveShopSettings(session.shop, settings);
 
-  throw redirect("/app");
+  const { initializeShopBilling } = await import("../lib/billing.server");
+  await initializeShopBilling(session.shop);
+
+  throw redirect("/app/billing");
 };
 
 function StepIndicator({ currentStep }) {
