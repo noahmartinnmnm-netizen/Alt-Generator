@@ -25,7 +25,7 @@ api_version = "2026-07"
 scopes = "write_products,read_products,write_files,read_files,write_metaobjects,write_metaobject_definitions"
 
 [auth]
-redirect_urls = [ "https://example.com/auth/callback" ]
+redirect_urls = [ "https://alt-generator-doiv.onrender.com/auth/callback" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"
