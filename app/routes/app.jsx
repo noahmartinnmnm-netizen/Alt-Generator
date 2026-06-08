@@ -25,6 +25,7 @@ export default function App() {
           <Link to="/app/image-alt-text">Image Alt text</Link>
           <Link to="/app/history">History</Link>
           <Link to="/app/settings">Brand profile</Link>
+          <Link to="/app/faq">Help & FAQ</Link>
         </ui-nav-menu>
         <Outlet />
       </PolarisProvider>

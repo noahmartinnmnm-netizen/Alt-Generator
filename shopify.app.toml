@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "6034cdf9a02b446c6415d003a83394eb"
-name = "Ai-alt-Text"
+name = "AI Alt Text Generator"
 application_url = "https://alt-generator-doiv.onrender.com"
 embedded = true
 

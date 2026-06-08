@@ -1,5 +1,6 @@
-import { redirect, Form, useLoaderData } from "react-router";
+import { redirect, Form, useLoaderData, Link } from "react-router";
 import { login } from "../../shopify.server";
+import { APP_NAME } from "../../lib/legal-content";
 import styles from "./styles.module.css";
 
 export const loader = async ({ request }) => {
@@ -18,9 +19,9 @@ export default function App() {
   return (
     <div className={styles.index}>
       <div className={styles.content}>
-        <h1 className={styles.heading}>A short heading about [your app]</h1>
+        <h1 className={styles.heading}>{APP_NAME}</h1>
         <p className={styles.text}>
-          A tagline about [your app] that describes your value proposition.
+          AI-powered alt text and SEO for your Shopify product images.
         </p>
         {showForm && (
           <Form className={styles.form} method="post" action="/auth/login">
@@ -36,18 +37,22 @@ export default function App() {
         )}
         <ul className={styles.list}>
           <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
+            <strong>AI alt text generation</strong>. Generate descriptive, SEO-friendly alt text for every product image using GPT-4o-mini vision.
           </li>
           <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
+            <strong>Brand-aware content</strong>. Tailor AI output to your industry, tone of voice, and SEO keywords.
           </li>
           <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
+            <strong>Review & rollback</strong>. Approve changes before they go live and roll back anytime from History.
           </li>
         </ul>
+        <nav className={styles.footer}>
+          <Link to="/privacy">Privacy Policy</Link>
+          <span>·</span>
+          <Link to="/terms">Terms of Service</Link>
+          <span>·</span>
+          <Link to="/faq">FAQ</Link>
+        </nav>
       </div>
     </div>
   );

@@ -10,6 +10,7 @@ import {
   InlineStack,
   Banner,
   Box,
+  Link,
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useLoaderData, useFetcher } from "react-router";
@@ -210,6 +211,16 @@ export default function SettingsPage() {
                 Save brand profile
               </Button>
             </InlineStack>
+
+            <Box paddingBlockStart="400">
+              <InlineStack gap="300" align="center">
+                <Link url="/app/faq">Help & FAQ</Link>
+                <Text as="span" variant="bodySm" tone="subdued">·</Text>
+                <Link url="/privacy" target="_blank">Privacy Policy</Link>
+                <Text as="span" variant="bodySm" tone="subdued">·</Text>
+                <Link url="/terms" target="_blank">Terms of Service</Link>
+              </InlineStack>
+            </Box>
           </BlockStack>
         </Layout.Section>
       </Layout>
