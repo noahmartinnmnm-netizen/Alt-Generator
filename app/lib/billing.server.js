@@ -2,6 +2,47 @@ import prisma from "../db.server";
 import { getPlanByBillingName, getPlanById, PLANS } from "./plans.server";
 
 /**
+ * Whether Shopify billing charges should be created as test charges.
+ * Dev stores require test charges; production stores require live charges.
+ */
+export function isBillingTestMode() {
+  if (process.env.SHOPIFY_BILLING_TEST === "true") {
+    return true;
+  }
+  if (process.env.SHOPIFY_BILLING_TEST === "false") {
+    return false;
+  }
+  return process.env.NODE_ENV !== "production";
+}
+
+/**
+ * Builds the URL Shopify redirects to after the merchant approves billing.
+ * Embedded apps should use the admin.shopify.com app URL format.
+ * @param {string} shop
+ * @param {string} [path="/app/billing"]
+ */
+export function buildBillingReturnUrl(shop, path = "/app/billing") {
+  const apiKey = process.env.SHOPIFY_API_KEY;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+  if (apiKey && shop) {
+    const shopHandle = shop.replace(/\.myshopify\.com$/i, "");
+    return `https://admin.shopify.com/store/${shopHandle}/apps/${apiKey}${normalizedPath}`;
+  }
+
+  const appUrl = process.env.SHOPIFY_APP_URL;
+  if (!appUrl) {
+    throw new Error(
+      "SHOPIFY_APP_URL is not set. Run the app with `shopify app dev` or configure SHOPIFY_APP_URL."
+    );
+  }
+
+  const returnUrl = new URL(normalizedPath, appUrl);
+  returnUrl.searchParams.set("shop", shop);
+  return returnUrl.toString();
+}
+
+/**
  * Ensures every shop has a subscription record (defaults to Free on install).
  * @param {string} shop
  */

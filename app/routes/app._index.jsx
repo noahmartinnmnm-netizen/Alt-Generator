@@ -46,9 +46,10 @@ export const loader = async ({ request }) => {
     throw redirect("/app/onboarding");
   }
 
+  const { isBillingTestMode } = await import("../lib/billing.server");
   const billingCheck = await billing.check({
     plans: PLAN_LIST.map((plan) => plan.billingKey).filter(Boolean),
-    isTest: process.env.NODE_ENV !== "production",
+    isTest: isBillingTestMode(),
   });
   await syncSubscriptionFromBillingCheck(session.shop, billingCheck);
 

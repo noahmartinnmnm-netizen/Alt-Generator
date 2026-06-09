@@ -19,6 +19,20 @@ topics = ["app/scopes_update"]
 uri = "/webhooks/app/uninstalled"
 topics = ["app/uninstalled"]
 
+# Mandatory compliance webhooks for App Store distribution
+# See: https://shopify.dev/docs/apps/build/compliance/privacy-law-compliance
+[[webhooks.subscriptions]]
+uri = "/webhooks/customers/data_request"
+compliance_topics = ["customers/data_request"]
+
+[[webhooks.subscriptions]]
+uri = "/webhooks/customers/redact"
+compliance_topics = ["customers/redact"]
+
+[[webhooks.subscriptions]]
+uri = "/webhooks/shop/redact"
+compliance_topics = ["shop/redact"]
+
 [access_scopes]
 scopes = "write_products,read_products,write_files,read_files,write_metaobjects,write_metaobject_definitions"
 

@@ -18,10 +18,13 @@ import {
 } from "@shopify/polaris";
 import { CheckIcon } from "@shopify/polaris-icons";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { BillingError } from "@shopify/shopify-api";
 import { authenticate } from "../shopify.server";
 import { getShopCreditBalance } from "../lib/seo.server";
 import {
+  buildBillingReturnUrl,
   getShopSubscription,
+  isBillingTestMode,
   syncSubscriptionFromBillingCheck,
 } from "../lib/billing.server";
 import { PLAN_LIST } from "../lib/plans.server";
@@ -36,7 +39,7 @@ export const loader = async ({ request }) => {
   }
   const billingCheck = await billing.check({
     plans: PLAN_LIST.map((plan) => plan.billingKey).filter(Boolean),
-    isTest: process.env.NODE_ENV !== "production",
+    isTest: isBillingTestMode(),
   });
 
   await syncSubscriptionFromBillingCheck(session.shop, billingCheck);
@@ -83,20 +86,36 @@ export const action = async ({ request }) => {
     return { status: "error", message: "Invalid plan selected." };
   }
 
-  const appUrl = process.env.SHOPIFY_APP_URL || new URL(request.url).origin;
-  const requestUrl = new URL(request.url);
-  const returnUrl = new URL("/app/billing", appUrl);
-  returnUrl.searchParams.set("shop", session.shop);
-  const host = requestUrl.searchParams.get("host");
-  if (host) {
-    returnUrl.searchParams.set("host", host);
-  }
+  try {
+    await billing.request({
+      plan: plan.billingKey,
+      isTest: isBillingTestMode(),
+      returnUrl: buildBillingReturnUrl(session.shop),
+    });
+  } catch (error) {
+    if (error instanceof BillingError) {
+      const shopifyMessage = error.errorData
+        ?.map((entry) => entry?.message)
+        .filter(Boolean)
+        .join(" ");
 
-  await billing.request({
-    plan: plan.billingKey,
-    isTest: process.env.NODE_ENV !== "production",
-    returnUrl: returnUrl.toString(),
-  });
+      console.error("Billing request failed:", {
+        shop: session.shop,
+        plan: plan.billingKey,
+        isTest: isBillingTestMode(),
+        errors: error.errorData,
+      });
+
+      return {
+        status: "error",
+        message:
+          shopifyMessage ||
+          "Could not start billing. Verify the app uses manual pricing (not managed pricing) in the Shopify Partner Dashboard.",
+      };
+    }
+
+    throw error;
+  }
 };
 
 export const headers = (headersArgs) => {
