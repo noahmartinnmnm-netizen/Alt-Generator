@@ -148,3 +148,14 @@ model ShopSettings {
   onboardingCompleted  Boolean  @default(false)
   updatedAt            DateTime @updatedAt
 }
+
+model ShopAuditCounts {
+  shop               String   @id
+  totalImages        Int      @default(0)
+  missingAltText     Int      @default(0)
+  optimizedAltText   Int      @default(0)
+  productsMissingSeo Int      @default(0)
+  aiGenerated        Int      @default(0)
+  refreshedAt        DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}

@@ -29,44 +29,39 @@ import { getIndustryLabel, getToneLabel } from "../lib/brand-profile.js";
 
 export const loader = async ({ request }) => {
   const {
-    getAllProductImages,
+    getEnrichedProductImages,
     getShopSettings,
     getShopAltTextUsageCount,
     getShopCreditBalance,
-    getImageAuditCounts,
+    computeImageAuditCounts,
     computeSeoHealthScore,
+    saveShopAuditCounts,
   } = await import("../lib/seo.server");
-  const { getShopSubscription, syncSubscriptionFromBillingCheck } = await import("../lib/billing.server");
-  const { PLAN_LIST } = await import("../lib/plans.server");
+  const { getShopSubscription } = await import("../lib/billing.server");
 
-  const { session, admin, redirect, billing } = await authenticate.admin(request);
+  const { session, admin, redirect } = await authenticate.admin(request);
   const shopSettings = await getShopSettings(session.shop);
 
   if (!shopSettings?.onboardingCompleted) {
     throw redirect("/app/onboarding");
   }
 
-  const { isBillingTestMode } = await import("../lib/billing.server");
-  const billingCheck = await billing.check({
-    plans: PLAN_LIST.map((plan) => plan.billingKey).filter(Boolean),
-    isTest: isBillingTestMode(),
-  });
-  await syncSubscriptionFromBillingCheck(session.shop, billingCheck);
-
-  const [productImages, usageCount, creditBalance, counts, subscription] = await Promise.all([
-    getAllProductImages(admin),
+  const [enrichedImages, usageCount, creditBalance, subscription] = await Promise.all([
+    getEnrichedProductImages(admin, session.shop),
     getShopAltTextUsageCount(session.shop),
     getShopCreditBalance(session.shop),
-    getImageAuditCounts(admin, session.shop),
     getShopSubscription(session.shop),
   ]);
+
+  const counts = computeImageAuditCounts(enrichedImages);
+  await saveShopAuditCounts(session.shop, counts);
 
   const totalImages = counts.totalImages;
   const imagesWithoutAltCount = counts.missingAltText;
   const optimizedCount = counts.optimizedAltText;
   const progress = totalImages > 0 ? (optimizedCount / totalImages) * 100 : 0;
 
-  const seoHealth = computeSeoHealthScore({ counts, shopSettings, productImages });
+  const seoHealth = computeSeoHealthScore({ counts, shopSettings, productImages: enrichedImages });
 
   return {
     shop: session.shop,

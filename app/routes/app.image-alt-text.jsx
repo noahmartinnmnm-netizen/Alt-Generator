@@ -1,4 +1,5 @@
-import { useFetcher, useLoaderData, useSearchParams } from "react-router";
+import { Await, useFetcher, useLoaderData, useSearchParams } from "react-router";
+import { Suspense } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -26,6 +27,8 @@ import {
   EmptySearchResult,
   Tooltip,
   Divider,
+  SkeletonBodyText,
+  SkeletonDisplayText,
 } from "@shopify/polaris";
 import {
   CheckIcon,
@@ -73,9 +76,21 @@ export const loader = async ({ request }) => {
   const after = url.searchParams.get("after");
   const before = url.searchParams.get("before");
 
-  const [audit, counts, keywords, creditBalance] = await Promise.all([
+  const forceRefresh = url.searchParams.get("refresh") === "1";
+  const { getShopAuditCountsFromCache } = await import("../lib/seo.server");
+
+  const countsPromise = (async () => {
+    if (!forceRefresh) {
+      const cached = await getShopAuditCountsFromCache(session.shop);
+      if (cached) {
+        return cached;
+      }
+    }
+    return getImageAuditCounts(admin, session.shop, { forceRefresh });
+  })();
+
+  const [audit, keywords, creditBalance] = await Promise.all([
     getProductImageAudit(admin, session.shop, { filter, query, after, before, pageSize: PAGE_SIZE }),
-    getImageAuditCounts(admin, session.shop),
     getAllProductKeywords(),
     getShopCreditBalance(session.shop),
   ]);
@@ -84,7 +99,7 @@ export const loader = async ({ request }) => {
     shop: session.shop,
     productImages: audit.images,
     pageInfo: audit.pageInfo,
-    counts,
+    counts: countsPromise,
     savedKeywords: keywords,
     shopSettings,
     creditBalance,
@@ -535,11 +550,49 @@ function getOptimizationStatus(change) {
   return { label: "Not generated", tone: "subdued" };
 }
 
+function AuditCountCards({ counts }) {
+  const statCards = [
+    ["Product media", counts.totalImages],
+    ["Missing image alt text", counts.missingAltText],
+    ["Optimized image alt text", counts.optimizedAltText],
+    ["Missing search engine listing", counts.productsMissingSeo],
+    ["AI suggestions or published", counts.aiGenerated],
+  ];
+
+  return (
+    <InlineGrid columns={5} gap="300">
+      {statCards.map(([label, value]) => (
+        <Card key={label}>
+          <BlockStack gap="100">
+            <Text as="p" variant="bodySm" tone="subdued">{label}</Text>
+            <Text as="p" variant="headingLg">{value}</Text>
+          </BlockStack>
+        </Card>
+      ))}
+    </InlineGrid>
+  );
+}
+
+function AuditCountCardsSkeleton() {
+  return (
+    <InlineGrid columns={5} gap="300">
+      {Array.from({ length: 5 }, (_, index) => (
+        <Card key={index}>
+          <BlockStack gap="100">
+            <SkeletonBodyText lines={1} />
+            <SkeletonDisplayText size="small" />
+          </BlockStack>
+        </Card>
+      ))}
+    </InlineGrid>
+  );
+}
+
 export default function ImageAltText() {
   const {
     productImages,
     pageInfo,
-    counts,
+    counts: countsPromise,
     savedKeywords,
     shopSettings,
     creditBalance: initialCreditBalance,
@@ -778,14 +831,6 @@ export default function ImageAltText() {
       seoDescription: draft.seoDescription || "",
     }, { method: "POST" });
   }, [drafts, editingContent, fetcher]);
-
-  const statCards = [
-    ["Product media", counts.totalImages],
-    ["Missing image alt text", counts.missingAltText],
-    ["Optimized image alt text", counts.optimizedAltText],
-    ["Missing search engine listing", counts.productsMissingSeo],
-    ["AI suggestions or published", counts.aiGenerated],
-  ];
 
   const rowMarkup = productImages.map((image, index) => {
     const imageChange = image.latestImageChange;
@@ -1125,16 +1170,11 @@ export default function ImageAltText() {
         </Layout.Section>
 
         <Layout.Section>
-          <InlineGrid columns={5} gap="300">
-            {statCards.map(([label, value]) => (
-              <Card key={label}>
-                <BlockStack gap="100">
-                  <Text as="p" variant="bodySm" tone="subdued">{label}</Text>
-                  <Text as="p" variant="headingLg">{value}</Text>
-                </BlockStack>
-              </Card>
-            ))}
-          </InlineGrid>
+          <Suspense fallback={<AuditCountCardsSkeleton />}>
+            <Await resolve={countsPromise}>
+              {(counts) => <AuditCountCards counts={counts} />}
+            </Await>
+          </Suspense>
         </Layout.Section>
 
         {availableCredits === 0 ? (

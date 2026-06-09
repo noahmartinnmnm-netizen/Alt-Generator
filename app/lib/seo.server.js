@@ -512,18 +512,122 @@ export async function getProductImageAudit(admin, shop, options = {}) {
   };
 }
 
-export async function getImageAuditCounts(admin, shop, maxProducts = 1000) {
-  const productImages = await getAllProductImages(admin, maxProducts);
-  const enrichedImages = await enrichImagesWithHistory(shop, productImages);
+const AUDIT_COUNTS_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Derives audit filter badge counts from an already-enriched product image list.
+ * @param {object[]} enrichedImages
+ */
+export function computeImageAuditCounts(enrichedImages) {
   const productById = new Map(enrichedImages.map((image) => [image.productId, image]));
 
   return {
     totalImages: enrichedImages.length,
     missingAltText: enrichedImages.filter((image) => !image.altText?.trim()).length,
     optimizedAltText: enrichedImages.filter((image) => image.altText?.trim()).length,
-    productsMissingSeo: Array.from(productById.values()).filter((image) => !image.productSeo?.title || !image.productSeo?.description).length,
-    aiGenerated: enrichedImages.filter((image) => ["SUGGESTED", "APPLIED"].includes(image.latestImageChange?.status)).length,
+    productsMissingSeo: Array.from(productById.values()).filter(
+      (image) => !image.productSeo?.title || !image.productSeo?.description
+    ).length,
+    aiGenerated: enrichedImages.filter((image) =>
+      ["SUGGESTED", "APPLIED"].includes(image.latestImageChange?.status)
+    ).length,
   };
+}
+
+/**
+ * Fetches all product images and merges local AI history in one pass.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ * @param {string} shop
+ * @param {number} [maxProducts]
+ */
+export async function getEnrichedProductImages(admin, shop, maxProducts = 1000) {
+  const productImages = await getAllProductImages(admin, maxProducts);
+  return enrichImagesWithHistory(shop, productImages);
+}
+
+function mapCachedAuditCounts(record) {
+  return {
+    totalImages: record.totalImages,
+    missingAltText: record.missingAltText,
+    optimizedAltText: record.optimizedAltText,
+    productsMissingSeo: record.productsMissingSeo,
+    aiGenerated: record.aiGenerated,
+  };
+}
+
+/**
+ * Returns cached audit counts when still fresh.
+ * @param {string} shop
+ */
+export async function getShopAuditCountsFromCache(shop) {
+  if (!prisma.shopAuditCounts || !shop) {
+    return null;
+  }
+
+  const cached = await prisma.shopAuditCounts.findUnique({ where: { shop } });
+  if (!cached) {
+    return null;
+  }
+
+  const ageMs = Date.now() - cached.refreshedAt.getTime();
+  if (ageMs > AUDIT_COUNTS_TTL_MS) {
+    return null;
+  }
+
+  return mapCachedAuditCounts(cached);
+}
+
+/**
+ * Persists audit counts for a shop (used after a full catalog scan).
+ * @param {string} shop
+ * @param {ReturnType<typeof computeImageAuditCounts>} counts
+ */
+export async function saveShopAuditCounts(shop, counts) {
+  if (!prisma.shopAuditCounts || !shop) {
+    return null;
+  }
+
+  const now = new Date();
+
+  return await prisma.shopAuditCounts.upsert({
+    where: { shop },
+    update: {
+      ...counts,
+      refreshedAt: now,
+    },
+    create: {
+      shop,
+      ...counts,
+      refreshedAt: now,
+    },
+  });
+}
+
+/**
+ * Scans the catalog when needed and caches counts per shop.
+ * Pass enrichedImages to skip Shopify when counts are derived from an existing scan.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ * @param {string} shop
+ * @param {{ maxProducts?: number, enrichedImages?: object[], forceRefresh?: boolean }} [options]
+ */
+export async function getImageAuditCounts(admin, shop, options = {}) {
+  const { maxProducts = 1000, enrichedImages, forceRefresh = false } = options;
+
+  if (enrichedImages) {
+    return computeImageAuditCounts(enrichedImages);
+  }
+
+  if (!forceRefresh) {
+    const cached = await getShopAuditCountsFromCache(shop);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const enriched = await getEnrichedProductImages(admin, shop, maxProducts);
+  const counts = computeImageAuditCounts(enriched);
+  await saveShopAuditCounts(shop, counts);
+  return counts;
 }
 
 const GENERIC_ALT_PATTERNS = [
