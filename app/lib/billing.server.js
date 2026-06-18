@@ -2,15 +2,38 @@ import prisma from "../db.server";
 import { getPlanByBillingName, getPlanById, PLANS } from "./plans.server";
 
 /**
+ * Whether the shop is a Partner development store.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ */
+export async function isShopPartnerDevelopment(admin) {
+  const response = await admin.graphql(
+    `#graphql
+      query ShopPlan {
+        shop {
+          plan {
+            partnerDevelopment
+          }
+        }
+      }`
+  );
+  const payload = await response.json();
+  return Boolean(payload?.data?.shop?.plan?.partnerDevelopment);
+}
+
+/**
  * Whether Shopify billing charges should be created as test charges.
  * Dev stores require test charges; production stores require live charges.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} [admin]
  */
-export function isBillingTestMode() {
+export async function isBillingTestMode(admin) {
   if (process.env.SHOPIFY_BILLING_TEST === "true") {
     return true;
   }
   if (process.env.SHOPIFY_BILLING_TEST === "false") {
     return false;
+  }
+  if (admin) {
+    return await isShopPartnerDevelopment(admin);
   }
   return process.env.NODE_ENV !== "production";
 }

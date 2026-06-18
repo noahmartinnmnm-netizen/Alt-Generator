@@ -31,15 +31,16 @@ import { PLAN_LIST } from "../lib/plans.server";
 
 export const loader = async ({ request }) => {
   const { getShopSettings } = await import("../lib/seo.server");
-  const { billing, session, redirect } = await authenticate.admin(request);
+  const { admin, billing, session, redirect } = await authenticate.admin(request);
   const shopSettings = await getShopSettings(session.shop);
 
   if (!shopSettings?.onboardingCompleted) {
     throw redirect("/app/onboarding");
   }
+  const billingIsTest = await isBillingTestMode(admin);
   const billingCheck = await billing.check({
     plans: PLAN_LIST.map((plan) => plan.billingKey).filter(Boolean),
-    isTest: isBillingTestMode(),
+    isTest: billingIsTest,
   });
 
   await syncSubscriptionFromBillingCheck(session.shop, billingCheck);
@@ -67,7 +68,8 @@ export const action = async ({ request }) => {
   const planId = formData.get("planId");
 
   if (planId === "free") {
-    const billingCheck = await billing.check();
+    const billingIsTest = await isBillingTestMode(admin);
+    const billingCheck = await billing.check({ isTest: billingIsTest });
     if (billingCheck.hasActivePayment) {
       await cancelActiveShopifySubscription(admin, session.shop);
     } else {
@@ -86,10 +88,12 @@ export const action = async ({ request }) => {
     return { status: "error", message: "Invalid plan selected." };
   }
 
+  const billingIsTest = await isBillingTestMode(admin);
+
   try {
     await billing.request({
       plan: plan.billingKey,
-      isTest: isBillingTestMode(),
+      isTest: billingIsTest,
       returnUrl: buildBillingReturnUrl(session.shop),
     });
   } catch (error) {
@@ -102,7 +106,7 @@ export const action = async ({ request }) => {
       console.error("Billing request failed:", {
         shop: session.shop,
         plan: plan.billingKey,
-        isTest: isBillingTestMode(),
+        isTest: billingIsTest,
         errors: error.errorData,
       });
 
