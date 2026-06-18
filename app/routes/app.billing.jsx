@@ -26,21 +26,27 @@ import {
   buildBillingReturnUrl,
   getShopSubscription,
   isBillingTestMode,
+  syncShopSubscriptionWithShopify,
 } from "../lib/billing.server";
 import { PLAN_LIST } from "../lib/plans.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticateAppRequest(request);
+  const { session, billing, admin } = await authenticateAppRequest(request);
+
+  await syncShopSubscriptionWithShopify(session.shop, billing, admin);
 
   const [subscription, creditBalance] = await Promise.all([
     getShopSubscription(session.shop),
     getShopCreditBalance(session.shop),
   ]);
 
+  const billingApproved = new URL(request.url).searchParams.has("charge_id");
+
   return {
     plans: PLAN_LIST,
     currentPlanId: subscription.planId,
     creditBalance,
+    billingApproved,
   };
 };
 
@@ -180,11 +186,18 @@ function PlanCard({ plan, isCurrent, loadingPlanId }) {
 }
 
 export default function BillingPage() {
-  const { plans, currentPlanId, creditBalance } = useLoaderData();
+  const { plans, currentPlanId, creditBalance, billingApproved } = useLoaderData();
   const actionData = useActionData();
   const navigation = useNavigation();
   const loadingPlanId =
     navigation.state !== "idle" ? navigation.formData?.get("planId") : null;
+  const currentPlan = plans.find((plan) => plan.id === currentPlanId);
+
+  useEffect(() => {
+    if (billingApproved && currentPlan) {
+      shopify.toast.show(`You are now on the ${currentPlan.name} plan.`);
+    }
+  }, [billingApproved, currentPlan]);
 
   useEffect(() => {
     if (actionData?.status === "success" && actionData?.message) {
@@ -229,7 +242,7 @@ export default function BillingPage() {
                   </Text>
                 </BlockStack>
                 <Badge tone="success">
-                  {plans.find((plan) => plan.id === currentPlanId)?.name || "Free"} plan
+                  {currentPlan?.name || "Free"} plan
                 </Badge>
               </InlineStack>
               <ProgressBar
@@ -240,6 +253,17 @@ export default function BillingPage() {
             </BlockStack>
           </Card>
         </Layout.Section>
+
+        {billingApproved && currentPlan ? (
+          <Layout.Section>
+            <Banner tone="success" title={`Your plan is now ${currentPlan.name}`}>
+              <p>
+                Billing was approved successfully. You have {currentPlan.tokens} tokens per billing
+                period on this plan.
+              </p>
+            </Banner>
+          </Layout.Section>
+        ) : null}
 
         <Layout.Section>
           <InlineGrid columns={{ xs: 1, sm: 2, lg: 4 }} gap="400">
@@ -253,6 +277,33 @@ export default function BillingPage() {
             ))}
           </InlineGrid>
         </Layout.Section>
+
+        {currentPlan ? (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="200">
+                <Text as="h2" variant="headingMd">
+                  Current plan
+                </Text>
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="100">
+                    <Text as="p" variant="bodyMd" fontWeight="semibold">
+                      {currentPlan.name}
+                    </Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      {currentPlan.price === 0
+                        ? "Free forever"
+                        : `$${currentPlan.price}/month · ${currentPlan.tokens} tokens per billing period`}
+                    </Text>
+                  </BlockStack>
+                  <Badge tone={currentPlan.id === "free" ? "info" : "success"}>
+                    Active
+                  </Badge>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        ) : null}
       </Layout>
     </Page>
   );

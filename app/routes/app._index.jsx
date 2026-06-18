@@ -32,9 +32,13 @@ import { getIndustryLabel, getToneLabel } from "../lib/brand-profile.js";
 
 export const loader = async ({ request }) => {
   const { getShopCreditBalance } = await import("../lib/seo.server");
-  const { getShopSubscription } = await import("../lib/billing.server");
+  const { getShopSubscription, syncShopSubscriptionWithShopify } = await import(
+    "../lib/billing.server"
+  );
 
-  const { session, shopSettings } = await authenticateAppRequest(request);
+  const { session, shopSettings, billing, admin } = await authenticateAppRequest(request);
+
+  await syncShopSubscriptionWithShopify(session.shop, billing, admin);
 
   const [creditBalance, subscription] = await Promise.all([
     getShopCreditBalance(session.shop),

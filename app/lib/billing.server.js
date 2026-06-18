@@ -191,6 +191,19 @@ export async function activateFreePlan(shop) {
 }
 
 /**
+ * Syncs local subscription state with Shopify Billing API (source of truth).
+ * Call after billing approval redirects so the UI reflects the new plan immediately.
+ * @param {string} shop
+ * @param {import("@shopify/shopify-app-react-router/server").BillingContext} billing
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ */
+export async function syncShopSubscriptionWithShopify(shop, billing, admin) {
+  const billingIsTest = await isBillingTestMode(admin);
+  const billingCheck = await billing.check({ isTest: billingIsTest });
+  return await syncSubscriptionFromBillingCheck(shop, billingCheck);
+}
+
+/**
  * Syncs local plan state from Shopify Billing API check results.
  * @param {string} shop
  * @param {{ appSubscriptions?: Array<{ name?: string, id?: string, status?: string }> }} billingCheck
