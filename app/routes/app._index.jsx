@@ -1,5 +1,5 @@
-import { Await, useLoaderData, useNavigate } from "react-router";
-import { Suspense } from "react";
+import { useFetcher, useLoaderData, useNavigate } from "react-router";
+import { useEffect } from "react";
 import {
   Page,
   Layout,
@@ -31,26 +31,23 @@ import { authenticateAppRequest } from "../lib/app-auth.server.js";
 import { getIndustryLabel, getToneLabel } from "../lib/brand-profile.js";
 
 export const loader = async ({ request }) => {
-  const { getDashboardStats, getShopCreditBalance } = await import("../lib/seo.server");
+  const { getShopCreditBalance } = await import("../lib/seo.server");
   const { getShopSubscription } = await import("../lib/billing.server");
 
-  const { session, admin, shopSettings } = await authenticateAppRequest(request);
+  const { session, shopSettings } = await authenticateAppRequest(request);
 
-  const billingPromise = Promise.all([
+  const [creditBalance, subscription] = await Promise.all([
     getShopCreditBalance(session.shop),
     getShopSubscription(session.shop),
-  ]).then(([creditBalance, subscription]) => ({
-    availableCredits: creditBalance.availableCredits,
-    totalCredits: creditBalance.totalCredits,
-    currentPlan: subscription.plan,
-  }));
-
-  const statsPromise = getDashboardStats(admin, session.shop, shopSettings);
+  ]);
 
   return {
     shopSettings,
-    billing: billingPromise,
-    stats: statsPromise,
+    billing: {
+      availableCredits: creditBalance.availableCredits,
+      totalCredits: creditBalance.totalCredits,
+      currentPlan: subscription.plan,
+    },
   };
 };
 
@@ -70,26 +67,6 @@ function priorityBadge(priority) {
   if (priority === "high") return <Badge tone="critical">High impact</Badge>;
   if (priority === "medium") return <Badge tone="warning">Medium impact</Badge>;
   return <Badge tone="info">Low impact</Badge>;
-}
-
-function PlanCardSkeleton() {
-  return (
-    <Card>
-      <BlockStack gap="400">
-        <SkeletonDisplayText size="small" />
-        <SkeletonBodyText lines={2} />
-        <SkeletonBodyText lines={1} />
-        <InlineStack gap="200">
-          <Box minWidth="120px">
-            <SkeletonDisplayText size="small" />
-          </Box>
-          <Box minWidth="100px">
-            <SkeletonDisplayText size="small" />
-          </Box>
-        </InlineStack>
-      </BlockStack>
-    </Card>
-  );
 }
 
 function SeoHealthSkeleton() {
@@ -440,8 +417,18 @@ function DashboardStatsSections({ stats, navigate, availableCredits }) {
 }
 
 export default function Dashboard() {
-  const { shopSettings, billing: billingPromise, stats: statsPromise } = useLoaderData();
+  const { shopSettings, billing } = useLoaderData();
+  const statsFetcher = useFetcher();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (statsFetcher.state === "idle" && !statsFetcher.data) {
+      statsFetcher.load("/app/dashboard-stats");
+    }
+  }, [statsFetcher]);
+
+  const stats = statsFetcher.data;
+  const statsLoading = !stats || statsFetcher.state === "loading";
 
   const industryLabel = getIndustryLabel(shopSettings?.industry, shopSettings?.otherIndustry);
   const toneLabel = getToneLabel(shopSettings?.tone);
@@ -450,20 +437,16 @@ export default function Dashboard() {
     <Page title="Dashboard">
       <Layout>
         <Layout.Section>
-          <Suspense fallback={<PlanCardSkeleton />}>
-            <Await resolve={billingPromise}>
-              {(billing) => <PlanCard billing={billing} navigate={navigate} />}
-            </Await>
-          </Suspense>
+          <PlanCard billing={billing} navigate={navigate} />
         </Layout.Section>
 
         <Layout.Section>
           <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
-            <Suspense fallback={<SeoHealthSkeleton />}>
-              <Await resolve={statsPromise}>
-                {(stats) => <SeoHealthCard seoHealth={stats.seoHealth} />}
-              </Await>
-            </Suspense>
+            {statsLoading ? (
+              <SeoHealthSkeleton />
+            ) : (
+              <SeoHealthCard seoHealth={stats.seoHealth} />
+            )}
 
             <Card>
               <BlockStack gap="400">
@@ -489,31 +472,25 @@ export default function Dashboard() {
           </InlineGrid>
         </Layout.Section>
 
-        <Suspense
-          fallback={
-            <>
-              <Layout.Section>
-                <PriorityActionsSkeleton />
-              </Layout.Section>
-              <Layout.Section>
-                <MetricCardsSkeleton />
-              </Layout.Section>
-              <Layout.Section>
-                <QuickActionsSkeleton />
-              </Layout.Section>
-            </>
-          }
-        >
-          <Await resolve={Promise.all([statsPromise, billingPromise])}>
-            {([stats, billing]) => (
-              <DashboardStatsSections
-                stats={stats}
-                navigate={navigate}
-                availableCredits={billing.availableCredits}
-              />
-            )}
-          </Await>
-        </Suspense>
+        {statsLoading ? (
+          <>
+            <Layout.Section>
+              <PriorityActionsSkeleton />
+            </Layout.Section>
+            <Layout.Section>
+              <MetricCardsSkeleton />
+            </Layout.Section>
+            <Layout.Section>
+              <QuickActionsSkeleton />
+            </Layout.Section>
+          </>
+        ) : (
+          <DashboardStatsSections
+            stats={stats}
+            navigate={navigate}
+            availableCredits={billing.availableCredits}
+          />
+        )}
       </Layout>
     </Page>
   );
