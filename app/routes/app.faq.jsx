@@ -9,14 +9,16 @@ import {
   Box,
   InlineStack,
 } from "@shopify/polaris";
-import { authenticate } from "../shopify.server";
+import { authenticateAppRequest } from "../lib/app-auth.server.js";
 import { FAQ_ITEMS } from "../lib/faq-content";
 import { APP_NAME, SUPPORT_EMAIL, APP_URL } from "../lib/legal-content";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  await authenticateAppRequest(request);
   return {};
 };
+
+export const shouldRevalidate = () => false;
 
 export default function FaqPage() {
   return (

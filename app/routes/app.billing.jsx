@@ -20,30 +20,17 @@ import { CheckIcon } from "@shopify/polaris-icons";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { BillingError } from "@shopify/shopify-api";
 import { authenticate } from "../shopify.server";
+import { authenticateAppRequest } from "../lib/app-auth.server.js";
 import { getShopCreditBalance } from "../lib/seo.server";
 import {
   buildBillingReturnUrl,
   getShopSubscription,
   isBillingTestMode,
-  syncSubscriptionFromBillingCheck,
 } from "../lib/billing.server";
 import { PLAN_LIST } from "../lib/plans.server";
 
 export const loader = async ({ request }) => {
-  const { getShopSettings } = await import("../lib/seo.server");
-  const { admin, billing, session, redirect } = await authenticate.admin(request);
-  const shopSettings = await getShopSettings(session.shop);
-
-  if (!shopSettings?.onboardingCompleted) {
-    throw redirect("/app/onboarding");
-  }
-  const billingIsTest = await isBillingTestMode(admin);
-  const billingCheck = await billing.check({
-    plans: PLAN_LIST.map((plan) => plan.billingKey).filter(Boolean),
-    isTest: billingIsTest,
-  });
-
-  await syncSubscriptionFromBillingCheck(session.shop, billingCheck);
+  const { session } = await authenticateAppRequest(request);
 
   const [subscription, creditBalance] = await Promise.all([
     getShopSubscription(session.shop),
@@ -54,8 +41,6 @@ export const loader = async ({ request }) => {
     plans: PLAN_LIST,
     currentPlanId: subscription.planId,
     creditBalance,
-    hasActivePayment: billingCheck.hasActivePayment,
-    activeBillingPlan: billingCheck.appSubscriptions?.[0]?.name || null,
   };
 };
 

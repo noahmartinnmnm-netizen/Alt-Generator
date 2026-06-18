@@ -1,6 +1,7 @@
-import { Await, useFetcher, useLoaderData, useSearchParams } from "react-router";
+import { Await, useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
 import { Suspense } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
+import { authenticateAppRequest } from "../lib/app-auth.server.js";
 import { authenticate } from "../shopify.server";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -59,16 +60,11 @@ export const loader = async ({ request }) => {
     getProductImageAudit,
     getImageAuditCounts,
     getAllProductKeywords,
-    getShopSettings,
     getShopCreditBalance,
+    getShopAuditCountsFromCache,
   } = await import("../lib/seo.server");
 
-  const { session, admin, redirect } = await authenticate.admin(request);
-  const shopSettings = await getShopSettings(session.shop);
-
-  if (!shopSettings?.onboardingCompleted) {
-    throw redirect("/app/onboarding");
-  }
+  const { session, admin, shopSettings } = await authenticateAppRequest(request);
 
   const url = new URL(request.url);
   const filter = url.searchParams.get("filter") || "all";
@@ -77,7 +73,6 @@ export const loader = async ({ request }) => {
   const before = url.searchParams.get("before");
 
   const forceRefresh = url.searchParams.get("refresh") === "1";
-  const { getShopAuditCountsFromCache } = await import("../lib/seo.server");
 
   const countsPromise = (async () => {
     if (!forceRefresh) {
@@ -89,9 +84,8 @@ export const loader = async ({ request }) => {
     return getImageAuditCounts(admin, session.shop, { forceRefresh });
   })();
 
-  const [audit, keywords, creditBalance] = await Promise.all([
+  const [audit, creditBalance] = await Promise.all([
     getProductImageAudit(admin, session.shop, { filter, query, after, before, pageSize: PAGE_SIZE }),
-    getAllProductKeywords(),
     getShopCreditBalance(session.shop),
   ]);
 
@@ -100,7 +94,7 @@ export const loader = async ({ request }) => {
     productImages: audit.images,
     pageInfo: audit.pageInfo,
     counts: countsPromise,
-    savedKeywords: keywords,
+    savedKeywords: getAllProductKeywords(),
     shopSettings,
     creditBalance,
     filter,
@@ -513,6 +507,53 @@ function parseFormJson(formData, key, fallback) {
   }
 }
 
+function buildAltChangeFromResult(result) {
+  return {
+    id: result.changeId,
+    status: result.applied ? "APPLIED" : "SUGGESTED",
+    suggestedAltText: result.suggestedAltText,
+    createdAt: new Date().toISOString(),
+    errorMessage: result.error || null,
+  };
+}
+
+function getEffectiveAltChange(image, pendingAltChanges) {
+  const pending = pendingAltChanges[image.imageId];
+  const loaded = image.latestImageChange;
+  if (pending && (!loaded || loaded.id !== pending.id)) {
+    return pending;
+  }
+  return loaded;
+}
+
+function getEffectiveSeoChange(image, pendingSeoChanges) {
+  const pending = pendingSeoChanges[image.productId];
+  const loaded = image.latestProductSeoChange;
+  if (pending && (!loaded || loaded.id !== pending.id)) {
+    return pending;
+  }
+  return loaded;
+}
+
+function buildSeoChangeFromResult(result) {
+  return {
+    id: result.changeId,
+    status: result.applied ? "APPLIED" : "SUGGESTED",
+    suggestedSeoTitle: result.seo?.title || "",
+    suggestedSeoDescription: result.seo?.description || "",
+    createdAt: new Date().toISOString(),
+    errorMessage: result.error || null,
+  };
+}
+
+async function postRouteAction(formData) {
+  const response = await fetch(`${window.location.pathname}${window.location.search}`, {
+    method: "POST",
+    body: formData,
+  });
+  return response.json();
+}
+
 function CellLoadingState({ message }) {
   return (
     <Box paddingBlock="200" minHeight="72px">
@@ -601,12 +642,19 @@ export default function ImageAltText() {
   } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher();
+  const revalidator = useRevalidator();
   const shopify = useAppBridge();
   const [productKeywords, setProductKeywords] = useState({});
   const [searchValue, setSearchValue] = useState(query);
   const [editingContent, setEditingContent] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [reviewBeforeSave, setReviewBeforeSave] = useState(false);
+  const [pendingAltChanges, setPendingAltChanges] = useState({});
+  const [pendingSeoChanges, setPendingSeoChanges] = useState({});
+  const [generatingAltIds, setGeneratingAltIds] = useState(() => new Set());
+  const [generatingSeoIds, setGeneratingSeoIds] = useState(() => new Set());
+  const [bulkGenerating, setBulkGenerating] = useState(false);
+  const [liveCreditBalance, setLiveCreditBalance] = useState(null);
   const handledResponse = useRef(null);
 
   useEffect(() => {
@@ -619,11 +667,23 @@ export default function ImageAltText() {
   }, [reviewBeforeSave]);
 
   useEffect(() => {
-    const kwMap = {};
-    savedKeywords.forEach((item) => {
-      kwMap[item.productId] = item.keywords;
+    let cancelled = false;
+
+    Promise.resolve(savedKeywords).then((keywords) => {
+      if (cancelled || !keywords) {
+        return;
+      }
+
+      const kwMap = {};
+      keywords.forEach((item) => {
+        kwMap[item.productId] = item.keywords;
+      });
+      setProductKeywords(kwMap);
     });
-    setProductKeywords(kwMap);
+
+    return () => {
+      cancelled = true;
+    };
   }, [savedKeywords]);
 
   useEffect(() => {
@@ -641,7 +701,8 @@ export default function ImageAltText() {
   }, [fetcher.data, fetcher.state, shopify]);
 
   const isLoading = fetcher.state !== "idle";
-  const creditBalance = fetcher.data?.creditBalance || initialCreditBalance;
+  const isGenerating = isLoading || bulkGenerating || generatingAltIds.size > 0 || generatingSeoIds.size > 0;
+  const creditBalance = liveCreditBalance || fetcher.data?.creditBalance || initialCreditBalance;
   const availableCredits = creditBalance?.availableCredits ?? 0;
   const totalCredits = creditBalance?.totalCredits ?? 30;
 
@@ -670,7 +731,6 @@ export default function ImageAltText() {
   const activeIntent = isLoading ? fetcher.formData?.get("intent") : null;
   const generatingAlt = activeIntent === "generate_alt_suggestions";
   const generatingSeo = activeIntent === "generate_product_seo_suggestion";
-  const generatingSelected = activeIntent === "generate_selected_suggestions";
   const applyingSuggestions = activeIntent === "apply_suggestions";
 
   const loadingFormImages = useMemo(
@@ -685,27 +745,26 @@ export default function ImageAltText() {
     () => new Set(loadingFormImages.map((image) => image.imageId)),
     [loadingFormImages],
   );
-  const loadingProductIds = useMemo(
-    () => new Set(loadingFormImages.map((image) => image.productId)),
-    [loadingFormImages],
-  );
 
   const pendingSuggestionsForSelected = useMemo(() => {
     const items = [];
     const seenSeoProducts = new Set();
 
     selectedImages.forEach((image) => {
-      if (image.latestImageChange?.status === "SUGGESTED") {
-        items.push({ changeId: image.latestImageChange.id, changeType: "IMAGE_ALT_TEXT" });
+      const imageChange = getEffectiveAltChange(image, pendingAltChanges);
+      const seoChange = getEffectiveSeoChange(image, pendingSeoChanges);
+
+      if (imageChange?.status === "SUGGESTED") {
+        items.push({ changeId: imageChange.id, changeType: "IMAGE_ALT_TEXT" });
       }
-      if (image.latestProductSeoChange?.status === "SUGGESTED" && !seenSeoProducts.has(image.productId)) {
+      if (seoChange?.status === "SUGGESTED" && !seenSeoProducts.has(image.productId)) {
         seenSeoProducts.add(image.productId);
-        items.push({ changeId: image.latestProductSeoChange.id, changeType: "PRODUCT_SEO" });
+        items.push({ changeId: seoChange.id, changeType: "PRODUCT_SEO" });
       }
     });
 
     return items;
-  }, [selectedImages]);
+  }, [selectedImages, pendingAltChanges, pendingSeoChanges]);
 
   const updateParams = useCallback((updates) => {
     const nextParams = new URLSearchParams(searchParams);
@@ -742,14 +801,120 @@ export default function ImageAltText() {
     }, { method: "POST" });
   }, [fetcher, productKeywords, reviewBeforeSave]);
 
-  const submitGenerateSelected = useCallback((images) => {
-    fetcher.submit({
-      intent: "generate_selected_suggestions",
-      images: JSON.stringify(images),
-      currentKeywords: JSON.stringify(productKeywords),
-      reviewBeforeSave: reviewBeforeSave ? "true" : "false",
-    }, { method: "POST" });
-  }, [fetcher, productKeywords, reviewBeforeSave]);
+  const submitGenerateSelected = useCallback(async (images) => {
+    const uniqueImages = Array.from(new Map(images.map((image) => [image.imageId, image])).values());
+    const uniqueProducts = Array.from(new Map(uniqueImages.map((image) => [image.productId, image])).values());
+
+    setGeneratingAltIds(new Set(uniqueImages.map((image) => image.imageId)));
+    setGeneratingSeoIds(new Set(uniqueProducts.map((product) => product.productId)));
+    setBulkGenerating(true);
+
+    let altSuccesses = 0;
+    let seoSuccesses = 0;
+    let failures = 0;
+    let creditErrorShown = false;
+
+    const runAltGeneration = uniqueImages.map(async (image) => {
+      try {
+        const formData = new FormData();
+        formData.set("intent", "generate_alt_suggestions");
+        formData.set("images", JSON.stringify([image]));
+        formData.set("currentKeywords", JSON.stringify(productKeywords));
+        formData.set("reviewBeforeSave", reviewBeforeSave ? "true" : "false");
+
+        const data = await postRouteAction(formData);
+
+        if (data.creditBalance) {
+          setLiveCreditBalance(data.creditBalance);
+        }
+
+        if (data.status === "error") {
+          failures += 1;
+          if (!creditErrorShown) {
+            creditErrorShown = true;
+            shopify.toast.show(data.message || "Could not complete alt text generation", { isError: true });
+          }
+          return;
+        }
+
+        const result = data.results?.[0];
+        if (result?.status === "success") {
+          altSuccesses += 1;
+          setPendingAltChanges((previous) => ({
+            ...previous,
+            [image.imageId]: buildAltChangeFromResult(result),
+          }));
+        } else {
+          failures += 1;
+        }
+      } catch {
+        failures += 1;
+      } finally {
+        setGeneratingAltIds((previous) => {
+          const next = new Set(previous);
+          next.delete(image.imageId);
+          return next;
+        });
+      }
+    });
+
+    const runSeoGeneration = uniqueProducts.map(async (product) => {
+      try {
+        const formData = new FormData();
+        formData.set("intent", "generate_product_seo_suggestion");
+        formData.set("product", JSON.stringify(product));
+        formData.set("reviewBeforeSave", reviewBeforeSave ? "true" : "false");
+
+        const data = await postRouteAction(formData);
+
+        if (data.creditBalance) {
+          setLiveCreditBalance(data.creditBalance);
+        }
+
+        if (data.status === "error") {
+          failures += 1;
+          if (!creditErrorShown) {
+            creditErrorShown = true;
+            shopify.toast.show(data.message || "Could not complete search engine listing generation", { isError: true });
+          }
+          return;
+        }
+
+        seoSuccesses += 1;
+        setPendingSeoChanges((previous) => ({
+          ...previous,
+          [product.productId]: buildSeoChangeFromResult({
+            changeId: data.changeId,
+            applied: data.applied,
+            seo: data.seo,
+          }),
+        }));
+      } catch {
+        failures += 1;
+      } finally {
+        setGeneratingSeoIds((previous) => {
+          const next = new Set(previous);
+          next.delete(product.productId);
+          return next;
+        });
+      }
+    });
+
+    await Promise.allSettled([...runAltGeneration, ...runSeoGeneration]);
+
+    setBulkGenerating(false);
+    revalidator.revalidate();
+
+    if (failures > 0 && altSuccesses === 0 && seoSuccesses === 0) {
+      return;
+    }
+
+    const message = reviewBeforeSave
+      ? `Created ${altSuccesses} image alt text and ${seoSuccesses} search engine listing suggestion(s). Review and apply to publish in Shopify.`
+      : `Published ${altSuccesses} image alt text and ${seoSuccesses} search engine listing update(s) to Shopify`;
+
+    shopify.toast.show(failures > 0 ? `${message} ${failures} could not be completed.` : message);
+  }, [productKeywords, reviewBeforeSave, revalidator, shopify]);
 
   const submitApplySuggestions = useCallback((items) => {
     fetcher.submit({
@@ -833,15 +998,13 @@ export default function ImageAltText() {
   }, [drafts, editingContent, fetcher]);
 
   const rowMarkup = productImages.map((image, index) => {
-    const imageChange = image.latestImageChange;
-    const seoChange = image.latestProductSeoChange;
-    const isRowGeneratingAlt = isLoading && (
-      (generatingAlt && loadingImageIds.has(image.imageId))
-      || (generatingSelected && loadingImageIds.has(image.imageId))
+    const imageChange = getEffectiveAltChange(image, pendingAltChanges);
+    const seoChange = getEffectiveSeoChange(image, pendingSeoChanges);
+    const isRowGeneratingAlt = generatingAltIds.has(image.imageId) || (
+      isLoading && generatingAlt && loadingImageIds.has(image.imageId)
     );
-    const isRowGeneratingSeo = isLoading && (
-      (generatingSeo && loadingFormProduct?.productId === image.productId)
-      || (generatingSelected && loadingProductIds.has(image.productId))
+    const isRowGeneratingSeo = generatingSeoIds.has(image.productId) || (
+      isLoading && generatingSeo && loadingFormProduct?.productId === image.productId
     );
     const altOptimization = getOptimizationStatus(imageChange);
     const seoOptimization = getOptimizationStatus(seoChange);
@@ -924,7 +1087,7 @@ export default function ImageAltText() {
                               submitApplySingleSuggestion(imageChange.id, "IMAGE_ALT_TEXT");
                             }}
                             loading={applyingSuggestions}
-                            disabled={isLoading}
+                            disabled={isGenerating}
                           />
                         </Tooltip>
                       </InlineStack>
@@ -1011,7 +1174,7 @@ export default function ImageAltText() {
                               submitApplySingleSuggestion(seoChange.id, "PRODUCT_SEO");
                             }}
                             loading={applyingSuggestions}
-                            disabled={isLoading}
+                            disabled={isGenerating}
                           />
                         </Tooltip>
                       </InlineStack>
@@ -1064,7 +1227,7 @@ export default function ImageAltText() {
                       submitGenerateAlt([image]);
                     }}
                     loading={isRowGeneratingAlt}
-                    disabled={isLoading || availableCredits < 1}
+                    disabled={isGenerating || availableCredits < 1}
                   >
                     {reviewBeforeSave ? "Suggest" : "Publish"}
                   </Button>
@@ -1080,10 +1243,10 @@ export default function ImageAltText() {
                             submitApplySingleSuggestion(imageChange.id, "IMAGE_ALT_TEXT");
                           }}
                           loading={applyingSuggestions}
-                          disabled={isLoading}
+                          disabled={isGenerating}
                         />
                       </Tooltip>
-                      <Button icon={RefreshIcon} accessibilityLabel="Regenerate image alt text suggestion" onClick={(event) => { event.stopPropagation(); submitGenerateAlt([image]); }} disabled={isLoading || availableCredits < 1} />
+                      <Button icon={RefreshIcon} accessibilityLabel="Regenerate image alt text suggestion" onClick={(event) => { event.stopPropagation(); submitGenerateAlt([image]); }} disabled={isGenerating || availableCredits < 1} />
                       <Button icon={DeleteIcon} accessibilityLabel="Discard image alt text suggestion" onClick={(event) => {
                         event.stopPropagation();
                         fetcher.submit({ intent: "reject_suggestion", changeId: imageChange.id }, { method: "POST" });
@@ -1103,7 +1266,7 @@ export default function ImageAltText() {
                       submitGenerateSeo(image);
                     }}
                     loading={isRowGeneratingSeo}
-                    disabled={isLoading || availableCredits < 1}
+                    disabled={isGenerating || availableCredits < 1}
                   >
                     {reviewBeforeSave ? "Suggest" : "Publish"}
                   </Button>
@@ -1119,7 +1282,7 @@ export default function ImageAltText() {
                             submitApplySingleSuggestion(seoChange.id, "PRODUCT_SEO");
                           }}
                           loading={applyingSuggestions}
-                          disabled={isLoading}
+                          disabled={isGenerating}
                         />
                       </Tooltip>
                       <Button icon={DeleteIcon} accessibilityLabel="Discard search engine listing suggestion" onClick={(event) => {
@@ -1232,7 +1395,7 @@ export default function ImageAltText() {
                       tone="success"
                       onClick={() => submitApplySuggestions(pendingSuggestionsForSelected)}
                       loading={applyingSuggestions}
-                      disabled={isLoading}
+                      disabled={isGenerating}
                     >
                       Publish {pendingSuggestionsForSelected.length} suggestion{pendingSuggestionsForSelected.length === 1 ? "" : "s"} to Shopify
                     </Button>
@@ -1241,8 +1404,8 @@ export default function ImageAltText() {
                     icon={MagicIcon}
                     variant="primary"
                     onClick={() => submitGenerateSelected(selectedImages)}
-                    loading={generatingSelected}
-                    disabled={selectedImages.length === 0 || selectedTokenCost > availableCredits || isLoading}
+                    loading={bulkGenerating}
+                    disabled={selectedImages.length === 0 || selectedTokenCost > availableCredits || isGenerating}
                   >
                     {reviewBeforeSave ? "Generate suggestions" : "Generate and publish"}
                   </Button>

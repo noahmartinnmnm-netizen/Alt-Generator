@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "ShopAuditCounts" ADD COLUMN "totalProducts" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "ShopAuditCounts" ADD COLUMN "qualityAltText" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "ShopAuditCounts" ADD COLUMN "weakAltText" INTEGER NOT NULL DEFAULT 0;

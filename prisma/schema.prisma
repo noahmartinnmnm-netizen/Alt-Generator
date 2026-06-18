@@ -156,6 +156,9 @@ model ShopAuditCounts {
   optimizedAltText   Int      @default(0)
   productsMissingSeo Int      @default(0)
   aiGenerated        Int      @default(0)
+  totalProducts      Int      @default(0)
+  qualityAltText     Int      @default(0)
+  weakAltText        Int      @default(0)
   refreshedAt        DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }

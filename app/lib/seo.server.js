@@ -520,17 +520,22 @@ const AUDIT_COUNTS_TTL_MS = 10 * 60 * 1000;
  */
 export function computeImageAuditCounts(enrichedImages) {
   const productById = new Map(enrichedImages.map((image) => [image.productId, image]));
+  const imagesWithAlt = enrichedImages.filter((image) => image.altText?.trim());
+  const qualityAltText = imagesWithAlt.filter((image) => isQualityAltText(image.altText)).length;
 
   return {
     totalImages: enrichedImages.length,
     missingAltText: enrichedImages.filter((image) => !image.altText?.trim()).length,
-    optimizedAltText: enrichedImages.filter((image) => image.altText?.trim()).length,
+    optimizedAltText: imagesWithAlt.length,
     productsMissingSeo: Array.from(productById.values()).filter(
       (image) => !image.productSeo?.title || !image.productSeo?.description
     ).length,
     aiGenerated: enrichedImages.filter((image) =>
       ["SUGGESTED", "APPLIED"].includes(image.latestImageChange?.status)
     ).length,
+    totalProducts: productById.size,
+    qualityAltText,
+    weakAltText: imagesWithAlt.length - qualityAltText,
   };
 }
 
@@ -552,7 +557,79 @@ function mapCachedAuditCounts(record) {
     optimizedAltText: record.optimizedAltText,
     productsMissingSeo: record.productsMissingSeo,
     aiGenerated: record.aiGenerated,
+    totalProducts: record.totalProducts ?? 0,
+    qualityAltText: record.qualityAltText ?? 0,
+    weakAltText: record.weakAltText ?? 0,
   };
+}
+
+/**
+ * Returns cached audit counts even when the TTL has expired (stale-while-revalidate).
+ * @param {string} shop
+ */
+export async function getShopAuditCountsStale(shop) {
+  if (!prisma.shopAuditCounts || !shop) {
+    return null;
+  }
+
+  const cached = await prisma.shopAuditCounts.findUnique({ where: { shop } });
+  return cached ? mapCachedAuditCounts(cached) : null;
+}
+
+/**
+ * Loads dashboard audit metrics. Uses cached counts when available; full scan only on cold start.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ * @param {string} shop
+ * @param {object|null} shopSettings
+ */
+export async function getDashboardStats(admin, shop, shopSettings) {
+  const [counts, usageCount] = await Promise.all([
+    getDashboardAuditCounts(admin, shop),
+    getShopAltTextUsageCount(shop),
+  ]);
+
+  const totalImages = counts.totalImages;
+  const optimizedCount = counts.optimizedAltText;
+  const imagesWithoutAltCount = counts.missingAltText;
+  const progress = totalImages > 0 ? (optimizedCount / totalImages) * 100 : 0;
+  const seoHealth = computeSeoHealthScore({ counts, shopSettings });
+
+  return {
+    counts,
+    aiGeneratedCount: usageCount,
+    totalImages,
+    optimizedCount,
+    imagesWithoutAltCount,
+    progress,
+    seoHealth,
+  };
+}
+
+/**
+ * Fast dashboard counts: serve cached data immediately and refresh stale cache in the background.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ * @param {string} shop
+ */
+export async function getDashboardAuditCounts(admin, shop) {
+  if (!prisma.shopAuditCounts || !shop) {
+    return getImageAuditCounts(admin, shop);
+  }
+
+  const cached = await prisma.shopAuditCounts.findUnique({ where: { shop } });
+  if (!cached) {
+    return getImageAuditCounts(admin, shop);
+  }
+
+  const counts = mapCachedAuditCounts(cached);
+  const ageMs = Date.now() - cached.refreshedAt.getTime();
+
+  if (ageMs > AUDIT_COUNTS_TTL_MS) {
+    void getImageAuditCounts(admin, shop, { forceRefresh: true }).catch((error) => {
+      console.error("Background audit count refresh failed:", error);
+    });
+  }
+
+  return counts;
 }
 
 /**
@@ -648,6 +725,140 @@ function isQualityAltText(altText) {
   return true;
 }
 
+function hasCompleteProductSeo(title, description) {
+  return Boolean(title?.trim() && description?.trim());
+}
+
+/**
+ * Computes how audit counts should shift when one image's alt text changes.
+ */
+function computeAltTextCountDelta(previousAltText, newAltText) {
+  const hadAlt = Boolean(previousAltText?.trim());
+  const hasAlt = Boolean(newAltText?.trim());
+  const delta = {
+    missingAltText: 0,
+    optimizedAltText: 0,
+    qualityAltText: 0,
+    weakAltText: 0,
+  };
+
+  if (!hadAlt && hasAlt) {
+    delta.missingAltText = -1;
+    delta.optimizedAltText = 1;
+    if (isQualityAltText(newAltText)) {
+      delta.qualityAltText = 1;
+    } else {
+      delta.weakAltText = 1;
+    }
+    return delta;
+  }
+
+  if (hadAlt && hasAlt) {
+    const wasQuality = isQualityAltText(previousAltText);
+    const isQuality = isQualityAltText(newAltText);
+    if (wasQuality && !isQuality) {
+      delta.qualityAltText = -1;
+      delta.weakAltText = 1;
+    } else if (!wasQuality && isQuality) {
+      delta.qualityAltText = 1;
+      delta.weakAltText = -1;
+    }
+    return delta;
+  }
+
+  if (hadAlt && !hasAlt) {
+    delta.missingAltText = 1;
+    delta.optimizedAltText = -1;
+    if (isQualityAltText(previousAltText)) {
+      delta.qualityAltText = -1;
+    } else {
+      delta.weakAltText = -1;
+    }
+  }
+
+  return delta;
+}
+
+function computeProductSeoCountDelta(previousTitle, previousDescription, newTitle, newDescription) {
+  const hadSeo = hasCompleteProductSeo(previousTitle, previousDescription);
+  const hasSeo = hasCompleteProductSeo(newTitle, newDescription);
+
+  if (!hadSeo && hasSeo) {
+    return { productsMissingSeo: -1 };
+  }
+  if (hadSeo && !hasSeo) {
+    return { productsMissingSeo: 1 };
+  }
+  return { productsMissingSeo: 0 };
+}
+
+function isEmptyAuditPatch(patch) {
+  return Object.values(patch).every((value) => !value);
+}
+
+/**
+ * Applies incremental count changes to the cached dashboard audit stats.
+ * Falls back to a full catalog rescan when no cache record exists yet.
+ */
+async function patchShopAuditCounts(admin, shop, patch) {
+  if (!shop || isEmptyAuditPatch(patch)) {
+    return;
+  }
+
+  if (!prisma.shopAuditCounts) {
+    if (admin) {
+      void getImageAuditCounts(admin, shop, { forceRefresh: true }).catch((error) => {
+        console.error("Audit count refresh after catalog change failed:", error);
+      });
+    }
+    return;
+  }
+
+  const existing = await prisma.shopAuditCounts.findUnique({ where: { shop } });
+  if (!existing) {
+    if (admin) {
+      void getImageAuditCounts(admin, shop, { forceRefresh: true }).catch((error) => {
+        console.error("Audit count refresh after catalog change failed:", error);
+      });
+    }
+    return;
+  }
+
+  await prisma.shopAuditCounts.update({
+    where: { shop },
+    data: {
+      missingAltText: Math.max(0, existing.missingAltText + (patch.missingAltText || 0)),
+      optimizedAltText: Math.max(0, existing.optimizedAltText + (patch.optimizedAltText || 0)),
+      qualityAltText: Math.max(0, existing.qualityAltText + (patch.qualityAltText || 0)),
+      weakAltText: Math.max(0, existing.weakAltText + (patch.weakAltText || 0)),
+      productsMissingSeo: Math.max(0, existing.productsMissingSeo + (patch.productsMissingSeo || 0)),
+      refreshedAt: new Date(),
+    },
+  });
+}
+
+async function patchShopAuditCountsForAltTextChange(admin, shop, previousAltText, newAltText) {
+  const patch = computeAltTextCountDelta(previousAltText, newAltText);
+  await patchShopAuditCounts(admin, shop, patch);
+}
+
+async function patchShopAuditCountsForProductSeoChange(
+  admin,
+  shop,
+  previousTitle,
+  previousDescription,
+  newTitle,
+  newDescription
+) {
+  const patch = computeProductSeoCountDelta(
+    previousTitle,
+    previousDescription,
+    newTitle,
+    newDescription
+  );
+  await patchShopAuditCounts(admin, shop, patch);
+}
+
 /**
  * Computes a 0–100 SEO health score with breakdown and prioritized actions.
  * @param {{ counts: object, shopSettings: object|null, productImages: object[] }} params
@@ -660,16 +871,31 @@ export function computeSeoHealthScore({ counts, shopSettings, productImages }) {
 
   const altCoverageScore = total > 0 ? Math.round((optimizedAlt / total) * 50) : 50;
 
-  const imagesWithAlt = productImages.filter((image) => image.altText?.trim());
-  const qualityCount = imagesWithAlt.filter((image) => isQualityAltText(image.altText)).length;
+  let qualityCount;
+  let imagesWithAltCount;
+  let weakAltCount;
+  let uniqueProducts;
+
+  if (productImages?.length) {
+    const imagesWithAlt = productImages.filter((image) => image.altText?.trim());
+    qualityCount = imagesWithAlt.filter((image) => isQualityAltText(image.altText)).length;
+    imagesWithAltCount = imagesWithAlt.length;
+    weakAltCount = imagesWithAltCount - qualityCount;
+    uniqueProducts = new Set(productImages.map((image) => image.productId)).size;
+  } else {
+    qualityCount = counts.qualityAltText ?? 0;
+    imagesWithAltCount = optimizedAlt;
+    weakAltCount = counts.weakAltText ?? 0;
+    uniqueProducts = counts.totalProducts ?? 0;
+  }
+
   const altQualityScore =
-    imagesWithAlt.length > 0
-      ? Math.round((qualityCount / imagesWithAlt.length) * 20)
+    imagesWithAltCount > 0
+      ? Math.round((qualityCount / imagesWithAltCount) * 20)
       : total === 0
         ? 20
         : 0;
 
-  const uniqueProducts = new Set(productImages.map((image) => image.productId)).size;
   const productSeoScore =
     uniqueProducts > 0
       ? Math.round(((uniqueProducts - productsMissingSeo) / uniqueProducts) * 20)
@@ -705,12 +931,12 @@ export function computeSeoHealthScore({ counts, shopSettings, productImages }) {
     });
   }
 
-  const weakAltCount = imagesWithAlt.filter((image) => !isQualityAltText(image.altText)).length;
-  if (weakAltCount > 0) {
+  const weakAltCountForActions = weakAltCount;
+  if (weakAltCountForActions > 0) {
     actions.push({
       id: "weak_alt",
       priority: "medium",
-      title: `Improve ${weakAltCount} weak alt text${weakAltCount === 1 ? "" : "s"}`,
+      title: `Improve ${weakAltCountForActions} weak alt text${weakAltCountForActions === 1 ? "" : "s"}`,
       description: "Descriptions that are too short, too long, or generic carry less SEO weight.",
       href: "/app/image-alt-text?filter=has_alt",
       count: weakAltCount,
@@ -1246,12 +1472,21 @@ export async function applyImageAltTextSuggestion(admin, shop, id) {
 
   await saveImageAltTextCache(change.imageUrl, altText);
 
-  return await updateSuggestion(shop, change.id, {
+  const updatedChange = await updateSuggestion(shop, change.id, {
     status: "APPLIED",
     appliedAltText: altText,
     appliedAt: new Date(),
     errorMessage: null,
   });
+
+  await patchShopAuditCountsForAltTextChange(
+    admin,
+    shop,
+    change.previousAltText || "",
+    altText
+  );
+
+  return updatedChange;
 }
 
 export async function applyProductSeoSuggestion(admin, shop, id) {
@@ -1281,13 +1516,24 @@ export async function applyProductSeoSuggestion(admin, shop, id) {
     throw new Error(userError.message);
   }
 
-  return await updateSuggestion(shop, change.id, {
+  const updatedChange = await updateSuggestion(shop, change.id, {
     status: "APPLIED",
     appliedSeoTitle: title,
     appliedSeoDescription: description,
     appliedAt: new Date(),
     errorMessage: null,
   });
+
+  await patchShopAuditCountsForProductSeoChange(
+    admin,
+    shop,
+    change.previousSeoTitle || "",
+    change.previousSeoDescription || "",
+    title,
+    description
+  );
+
+  return updatedChange;
 }
 
 export async function getSeoChangeHistory(shop, limit = 50) {
@@ -1352,6 +1598,24 @@ export async function rollbackSeoChange(admin, shop, id) {
       if (userError) {
         throw new Error(userError.message);
       }
+    }
+
+    if (change.changeType === "IMAGE_ALT_TEXT") {
+      await patchShopAuditCountsForAltTextChange(
+        admin,
+        shop,
+        change.appliedAltText || change.suggestedAltText || "",
+        change.previousAltText || ""
+      );
+    } else {
+      await patchShopAuditCountsForProductSeoChange(
+        admin,
+        shop,
+        change.appliedSeoTitle || change.suggestedSeoTitle || "",
+        change.appliedSeoDescription || change.suggestedSeoDescription || "",
+        change.previousSeoTitle || "",
+        change.previousSeoDescription || ""
+      );
     }
 
     return await updateSuggestion(shop, change.id, {

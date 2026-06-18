@@ -16,11 +16,12 @@ import {
   Text,
 } from "@shopify/polaris";
 import { UndoIcon } from "@shopify/polaris-icons";
-import { authenticate } from "../shopify.server";
+import { authenticateAppRequest } from "../lib/app-auth.server.js";
 import { getSeoChangeHistory, rollbackSeoChange } from "../lib/seo.server";
+import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session } = await authenticateAppRequest(request);
   const history = await getSeoChangeHistory(session.shop, 100);
 
   return { history };

@@ -14,19 +14,14 @@ import {
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useLoaderData, useFetcher } from "react-router";
+import { authenticateAppRequest } from "../lib/app-auth.server.js";
 import { authenticate } from "../shopify.server";
-import { getShopSettings, saveShopSettings } from "../lib/seo.server";
+import { saveShopSettings } from "../lib/seo.server";
 import { INDUSTRY_OPTIONS, TONE_OPTIONS } from "../lib/brand-profile.js";
 
 export const loader = async ({ request }) => {
-  const { session, redirect } = await authenticate.admin(request);
-  const settings = await getShopSettings(session.shop);
-
-  if (!settings?.onboardingCompleted) {
-    throw redirect("/app/onboarding");
-  }
-
-  return { settings: settings || {} };
+  const { shopSettings } = await authenticateAppRequest(request);
+  return { settings: shopSettings || {} };
 };
 
 export const action = async ({ request }) => {
