@@ -23,6 +23,11 @@ export const action = async ({ request }) => {
         status,
       });
       await resetBillingPeriodTokens(shop, plan.id);
+    } else {
+      console.warn(`Unknown billing plan name in subscription webhook: ${planName}`, {
+        shop,
+        subscriptionId: subscription.admin_graphql_api_id,
+      });
     }
     return new Response();
   }

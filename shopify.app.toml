@@ -19,6 +19,10 @@ topics = ["app/scopes_update"]
 uri = "/webhooks/app/uninstalled"
 topics = ["app/uninstalled"]
 
+[[webhooks.subscriptions]]
+uri = "/webhooks/app/subscriptions_update"
+topics = ["app_subscriptions/update"]
+
 # Mandatory compliance webhooks for App Store distribution
 # See: https://shopify.dev/docs/apps/build/compliance/privacy-law-compliance
 [[webhooks.subscriptions]]

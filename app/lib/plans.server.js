@@ -79,8 +79,24 @@ export function getPlanById(planId) {
  * @param {string | null | undefined} billingPlanName
  */
 export function getPlanByBillingName(billingPlanName) {
-  const planId = BILLING_KEY_TO_PLAN_ID[billingPlanName];
-  return planId ? PLANS[planId] : PLANS.free;
+  if (!billingPlanName) {
+    return PLANS.free;
+  }
+
+  const normalized = billingPlanName.trim();
+  const directMatch = BILLING_KEY_TO_PLAN_ID[normalized];
+  if (directMatch) {
+    return PLANS[directMatch];
+  }
+
+  const normalizedLower = normalized.toLowerCase();
+  for (const [billingName, planId] of Object.entries(BILLING_KEY_TO_PLAN_ID)) {
+    if (billingName.toLowerCase() === normalizedLower) {
+      return PLANS[planId];
+    }
+  }
+
+  return PLANS.free;
 }
 
 /**

@@ -191,15 +191,57 @@ export async function activateFreePlan(shop) {
 }
 
 /**
+ * Loads active app subscriptions from Shopify (test and live).
+ * billing.check({ isTest: false }) omits test subscriptions, which breaks sync when
+ * Shopify creates a test charge on stores that are not flagged as partner development.
+ * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ */
+export async function fetchActiveAppSubscriptions(admin) {
+  const response = await admin.graphql(
+    `#graphql
+      query ActiveAppSubscriptions {
+        currentAppInstallation {
+          activeSubscriptions {
+            id
+            name
+            status
+            test
+          }
+        }
+      }`
+  );
+  const payload = await response.json();
+  return payload?.data?.currentAppInstallation?.activeSubscriptions || [];
+}
+
+/**
  * Syncs local subscription state with Shopify Billing API (source of truth).
  * Call after billing approval redirects so the UI reflects the new plan immediately.
  * @param {string} shop
  * @param {import("@shopify/shopify-app-react-router/server").BillingContext} billing
  * @param {import("@shopify/shopify-app-react-router/server").AdminApiContext} admin
+ * @param {{ retryOnEmpty?: boolean }} [options]
  */
-export async function syncShopSubscriptionWithShopify(shop, billing, admin) {
-  const billingIsTest = await isBillingTestMode(admin);
-  const billingCheck = await billing.check({ isTest: billingIsTest });
+export async function syncShopSubscriptionWithShopify(shop, billing, admin, options = {}) {
+  let subscriptions = await fetchActiveAppSubscriptions(admin);
+
+  if (subscriptions.length === 0 && options.retryOnEmpty) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    subscriptions = await fetchActiveAppSubscriptions(admin);
+  }
+
+  if (subscriptions.length > 0) {
+    return await syncSubscriptionFromBillingCheck(shop, {
+      appSubscriptions: subscriptions.map((subscription) => ({
+        id: subscription.id,
+        name: subscription.name,
+        status: subscription.status,
+      })),
+    });
+  }
+
+  // Fallback: isTest true includes both test and live subscriptions (Shopify API filter).
+  const billingCheck = await billing.check({ isTest: true });
   return await syncSubscriptionFromBillingCheck(shop, billingCheck);
 }
 
@@ -209,9 +251,9 @@ export async function syncShopSubscriptionWithShopify(shop, billing, admin) {
  * @param {{ appSubscriptions?: Array<{ name?: string, id?: string, status?: string }> }} billingCheck
  */
 export async function syncSubscriptionFromBillingCheck(shop, billingCheck) {
-  const activeSubscription = billingCheck?.appSubscriptions?.find(
-    (subscription) => subscription.status === "ACTIVE"
-  );
+  const activeSubscription =
+    billingCheck?.appSubscriptions?.find((subscription) => subscription.status === "ACTIVE") ||
+    billingCheck?.appSubscriptions?.[0];
 
   if (!activeSubscription?.name) {
     const current = await ensureShopSubscription(shop);

@@ -33,14 +33,16 @@ import { PLAN_LIST } from "../lib/plans.server";
 export const loader = async ({ request }) => {
   const { session, billing, admin } = await authenticateAppRequest(request);
 
-  await syncShopSubscriptionWithShopify(session.shop, billing, admin);
+  const billingApproved = new URL(request.url).searchParams.has("charge_id");
+
+  await syncShopSubscriptionWithShopify(session.shop, billing, admin, {
+    retryOnEmpty: billingApproved,
+  });
 
   const [subscription, creditBalance] = await Promise.all([
     getShopSubscription(session.shop),
     getShopCreditBalance(session.shop),
   ]);
-
-  const billingApproved = new URL(request.url).searchParams.has("charge_id");
 
   return {
     plans: PLAN_LIST,
@@ -59,8 +61,7 @@ export const action = async ({ request }) => {
   const planId = formData.get("planId");
 
   if (planId === "free") {
-    const billingIsTest = await isBillingTestMode(admin);
-    const billingCheck = await billing.check({ isTest: billingIsTest });
+    const billingCheck = await billing.check({ isTest: true });
     if (billingCheck.hasActivePayment) {
       await cancelActiveShopifySubscription(admin, session.shop);
     } else {
@@ -115,6 +116,14 @@ export const action = async ({ request }) => {
 
 export const headers = (headersArgs) => {
   return boundary.headers(headersArgs);
+};
+
+export const shouldRevalidate = ({ defaultShouldRevalidate, currentUrl, nextUrl }) => {
+  const hasBillingReturn = (url) => new URL(url).searchParams.has("charge_id");
+  if (hasBillingReturn(currentUrl) || hasBillingReturn(nextUrl)) {
+    return true;
+  }
+  return defaultShouldRevalidate;
 };
 
 function PlanCard({ plan, isCurrent, loadingPlanId }) {
