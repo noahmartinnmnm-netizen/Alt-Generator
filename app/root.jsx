@@ -1,4 +1,5 @@
 import { Links, Meta, Outlet, Scripts } from "react-router";
+import { TawkChat } from "./components/TawkChat";
 
 export const links = () => [
   {
@@ -23,6 +24,7 @@ export default function App() {
       </head>
       <body>
         <Outlet />
+        <TawkChat />
         <Scripts />
       </body>
     </html>
